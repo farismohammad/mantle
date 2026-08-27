@@ -81,8 +81,8 @@ mantle create frontend-web --description "Frontend development agent"
 Add direct upstream resources; each command installs into only that agent and updates its local YAML:
 
 ```bash
-mantle add-skill https://github.com/anthropics/skills frontend-web \
-  --skill frontend-design
+mantle skills add https://github.com/anthropics/skills \
+  --skill frontend-design --agent frontend-web
 mantle add-package npm:pi-lens frontend-web
 ```
 

@@ -22,7 +22,9 @@ from mantle.skills import SkillManager
 
 app = typer.Typer(help="Create, reproduce, and run isolated personal Pi agents.", no_args_is_help=True)
 runtime_app = typer.Typer(help="Manage Mantle's shared Pi runtime cache.", no_args_is_help=True)
+skills_app = typer.Typer(help="Manage agent skills.", no_args_is_help=True)
 app.add_typer(runtime_app, name="runtime")
+app.add_typer(skills_app, name="skills")
 console = Console()
 
 
@@ -192,11 +194,11 @@ def run_agent(
     raise typer.Exit(AgentLauncher(paths()).run(spec))
 
 
-@app.command("add-skill")
+@skills_app.command("add")
 def add_skill(
     source: str,
-    agent: str,
     skill: Annotated[str, typer.Option("--skill", help="Skill directory/name within the source.")],
+    agent: Annotated[str, typer.Option("--agent", help="Agent to install the skill into.")],
     force: Annotated[bool, typer.Option("--force")] = False,
 ) -> None:
     """Install a skill from its source and update local agent.yaml only."""
