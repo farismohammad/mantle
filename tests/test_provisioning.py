@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from mantle.agents import AgentStore
 from mantle.configuration import dump_agent_yaml
-from mantle.models import ResourceDefinition, RuntimeMetadata, default_agent_config
+from mantle.models import McpServerDefinition, ResourceDefinition, RuntimeMetadata, default_agent_config
 from mantle.paths import MantlePaths
 from mantle.provisioning import Provisioner
 
@@ -40,10 +40,12 @@ def provisioner(paths, skills=None):
     )
 
 
-def desired(description="First", skills=("alpha",), packages=("tool",)):
+def desired(description="First", skills=("alpha",), packages=("tool",), mcp=False):
     config = default_agent_config("developer", description)
     config.resources.skills = [ResourceDefinition(name=name, source=f"https://example.test/{name}") for name in skills]
     config.resources.packages = [ResourceDefinition(name=name, source=f"npm:{name}") for name in packages]
+    if mcp:
+        config.mcp.servers = {"docs": McpServerDefinition(url="https://mcp.example.test/mcp")}
     return config
 
 
@@ -57,6 +59,13 @@ def test_install_reconstructs_complete_agent(mantle_home):
     assert AgentStore(paths).get("developer").agent.description == "First"
     assert paths.yaml("developer").read_text() == cloud_yaml
     assert (paths.agent("developer") / "models.json").read_text() == '{\n  "providers": {}\n}\n'
+
+
+def test_install_reconstructs_mcp_adapter_as_managed_agent_resource(mantle_home):
+    paths = MantlePaths.discover()
+    provisioner(paths).install(desired(mcp=True))
+    source = paths.agent("developer") / "packages/pi-mcp-adapter/source"
+    assert source.read_text() == "npm:pi-mcp-adapter@2.29.0@1.0.0"
 
 
 def test_update_adds_and_removes_resources_and_preserves_local_state(mantle_home):

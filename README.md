@@ -44,6 +44,7 @@ uv run pytest
         ├── skills/
         ├── packages/
         ├── context/
+        ├── mantle-mcp.json     # generated from agent.yaml when MCP is enabled
         ├── npm/ and git/       # Pi-managed package files
         ├── auth.json           # Pi-managed OAuth/login state
         └── sessions/
@@ -138,11 +139,22 @@ resources:
   packages:
     - name: pi-lens
       source: npm:pi-lens
+mcp:
+  servers:
+    local-docs:
+      command: npx
+      args: [-y, "@example/docs-mcp"]
+      direct_tools: [search]
+    hosted-docs:
+      url: https://mcp.example.com/mcp
+      auth: bearer
+      bearer_token_env: DOCS_MCP_TOKEN
 permissions:
   filesystem: all
   shell: all
 secrets:
   - OPENAI_API_KEY
+  - DOCS_MCP_TOKEN
 ```
 
 The CLI validates YAML syntax and this schema before use or upload. Cloud validates the same model through JSON Schema generated from the CLI’s Pydantic model (`scripts/export_schema.py`).
@@ -160,9 +172,28 @@ Only names declared by the agent are loaded from this file. The `.env` file is n
 
 Pi owns OAuth and session authentication through the agent-local `auth.json`; Mantle does not implement OAuth.
 
+## MCP servers
+
+Declare MCP servers under `mcp.servers` in `agent.yaml`. Mantle automatically installs a pinned
+`pi-mcp-adapter` into that agent, generates an agent-local bridge at launch, and passes the
+configuration to the adapter as an isolated in-memory snapshot. The adapter does not merge
+`.mcp.json`, `.pi/mcp.json`, user-global MCP files, host configurations, or another Mantle agent's
+configuration.
+
+Each server must use exactly one transport:
+
+- `command` plus optional `args`, `env`, and `cwd` for a local stdio server.
+- `url` plus optional `headers`, `auth`, and `bearer_token_env` for HTTP.
+
+Supported controls include `lifecycle`, `idle_timeout`, `request_timeout_ms`, `protocol_version`,
+`expose_resources`, `direct_tools`, `include_tools`, `exclude_tools`, `disabled`, and `debug`.
+Secret values belong in `~/.mantle/.env`; reference them by environment-variable name and declare
+the same name under the agent's `secrets` list. MCP server processes run as tools inside the Pi
+session—they are not separate Mantle agents.
+
 ## Isolation boundary
 
-Mantle disables Pi’s implicit global/project discovery and explicitly passes only the selected agent’s skills, package resources, local context, and root-level project instructions. Unrelated global Pi, Codex, Claude, or agent skill directories are not loaded.
+Mantle disables Pi’s implicit global/project discovery and explicitly passes only the selected agent’s skills, package resources, MCP servers, local context, and root-level project instructions. Unrelated global Pi, MCP, Codex, Claude, or agent skill directories are not loaded.
 
 Mantle is not an operating-system sandbox. Pi and package extensions execute with your user permissions. Review upstream code before installation.
 

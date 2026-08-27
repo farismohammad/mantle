@@ -6,6 +6,7 @@ from pathlib import Path
 
 from mantle.agents import AgentStore, normalize_models_config, prepare_agent_root
 from mantle.errors import ConflictError, MantleError, NotFoundError
+from mantle.mcp import MCP_ADAPTER
 from mantle.models import AgentConfig
 from mantle.packages import PackageManager
 from mantle.paths import MantlePaths
@@ -60,6 +61,8 @@ class Provisioner:
                 self.skills.install_reference(skill, staging)
             for package in config.resources.packages:
                 self.packages.install_reference(package, staging, runtime.version)
+            if config.mcp.servers:
+                self.packages.install_reference(MCP_ADAPTER, staging, runtime.version)
             if previous is not None:
                 self._preserve_local_state(previous, staging)
                 previous.rename(backup)

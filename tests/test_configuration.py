@@ -43,6 +43,44 @@ runtime: {name: python, version: latest}
 """)
 
 
+def test_mcp_servers_require_one_supported_transport():
+    config = parse_agent_yaml("""mantle: '0.1'
+agent: {name: research}
+secrets: [DOCS_TOKEN]
+mcp:
+  servers:
+    docs:
+      url: https://mcp.example.test/mcp
+      auth: bearer
+      bearer_token_env: DOCS_TOKEN
+    local:
+      command: npx
+      args: [-y, example-mcp-server]
+""")
+    assert set(config.mcp.servers) == {"docs", "local"}
+
+    with pytest.raises(MantleError, match="exactly one of command or url"):
+        parse_agent_yaml("""mantle: '0.1'
+agent: {name: broken}
+mcp:
+  servers:
+    invalid: {}
+""")
+
+
+def test_first_class_mcp_rejects_ambient_adapter_package():
+    with pytest.raises(MantleError, match="managed automatically"):
+        parse_agent_yaml("""mantle: '0.1'
+agent: {name: research}
+resources:
+  packages:
+    - {name: pi-mcp-adapter, source: 'npm:pi-mcp-adapter'}
+mcp:
+  servers:
+    docs: {url: 'https://mcp.example.test/mcp'}
+""")
+
+
 def test_cli_uses_simple_top_level_lifecycle(cli, mantle_home):
     created = cli("create", "developer", "--description", "Writes software")
     assert created.exit_code == 0, created.stdout

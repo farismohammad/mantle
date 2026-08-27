@@ -65,7 +65,7 @@ def list_agents(as_json: Annotated[bool, typer.Option("--json")] = False) -> Non
     if as_json:
         typer.echo(json.dumps([item.model_dump(mode="json") for item in agents], indent=2))
         return
-    table = Table("AGENT", "MODEL", "RUNTIME", "SKILLS", "PACKAGES", "LOCATION")
+    table = Table("AGENT", "MODEL", "RUNTIME", "SKILLS", "PACKAGES", "MCP", "LOCATION")
     for item in agents:
         table.add_row(
             item.agent.name,
@@ -73,6 +73,7 @@ def list_agents(as_json: Annotated[bool, typer.Option("--json")] = False) -> Non
             f"pi@{item.runtime.version}",
             str(len(item.resources.skills)),
             str(len(item.resources.packages)),
+            str(len(item.mcp.servers)),
             str(paths().agent(item.agent.name)),
         )
     console.print(table)

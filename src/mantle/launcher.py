@@ -11,7 +11,9 @@ from typing import Iterable
 from mantle.agents import AgentStore, normalize_models_config
 from mantle.errors import MantleError
 from mantle.logging import append_event
+from mantle.mcp import MCP_ADAPTER, remove_mcp_bridge, write_mcp_bridge
 from mantle.models import ResourceDefinition
+from mantle.packages import PackageManager
 from mantle.paths import MantlePaths
 from mantle.projects import project_id, resolve_project_root
 from mantle.runtimes import RuntimeManager
@@ -63,6 +65,18 @@ class AgentLauncher:
             "--provider", config.model.provider,
             "--model", config.model.name,
         ]
+        if config.mcp.servers:
+            adapter_root = self._find_package_root(agent_root, MCP_ADAPTER)
+            if adapter_root is None:
+                PackageManager(self.paths).install_reference(MCP_ADAPTER, agent_root, runtime.version)
+                adapter_root = self._find_package_root(agent_root, MCP_ADAPTER)
+            if adapter_root is None:
+                raise MantleError(
+                    f'MCP adapter installation is missing for agent "{agent_name}". Run: mantle update {agent_name}'
+                )
+            write_mcp_bridge(agent_root, config, adapter_root)
+        else:
+            remove_mcp_bridge(agent_root)
         command += self._explicit_resources(agent_root, config.resources.packages)
         excluded_tools = []
         if config.permissions.shell == "none":
@@ -125,7 +139,12 @@ class AgentLauncher:
         candidates: list[Path] = []
         if package.source.startswith("npm:"):
             name = package.name
-            candidates.extend((agent_root / "npm" / name, agent_root / "npm" / "node_modules" / name))
+            candidates.extend((
+                agent_root / "npm" / name,
+                agent_root / "npm" / "node_modules" / name,
+                agent_root / "pi" / "npm" / name,
+                agent_root / "pi" / "npm" / "node_modules" / name,
+            ))
         for candidate in candidates:
             if candidate.is_dir():
                 return candidate

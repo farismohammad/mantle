@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
+
 from mantle.agents import AgentStore
 from mantle.launcher import AgentLauncher
-from mantle.models import RuntimeMetadata
+from mantle.models import McpServerDefinition, RuntimeMetadata
 from mantle.paths import MantlePaths
 from mantle.storage import write_json
 
@@ -51,3 +53,56 @@ def test_launch_repairs_legacy_empty_models_config(mantle_home, tmp_path, monkey
     AgentLauncher(paths).build("developer", current=tmp_path)
 
     assert models.read_text() == '{\n  "providers": {}\n}\n'
+
+
+def test_launch_uses_only_agent_declared_mcp_config(mantle_home, tmp_path, monkeypatch):
+    paths = setup(mantle_home)
+    config = AgentStore(paths).get("developer")
+    config.mcp.servers = {
+        "docs": McpServerDefinition(
+            url="https://mcp.example.test/mcp",
+            auth="bearer",
+            bearer_token_env="DOCS_TOKEN",
+            direct_tools=["search"],
+        )
+    }
+    config.secrets.append("DOCS_TOKEN")
+    AgentStore(paths).save(config)
+    adapter = paths.agent("developer") / "npm/node_modules/pi-mcp-adapter"
+    adapter.mkdir(parents=True)
+    (adapter / "index.ts").write_text("export const createMcpAdapter = () => {};\n")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-secret")
+    monkeypatch.setenv("DOCS_TOKEN", "docs-secret")
+
+    spec = AgentLauncher(paths).build("developer", current=tmp_path)
+
+    bridge = paths.agent("developer") / "extensions/mantle-mcp.ts"
+    assert spec.command.count(str(bridge)) == 1
+    assert "createMcpAdapter({ config })" in bridge.read_text()
+    generated = json.loads((paths.agent("developer") / "mantle-mcp.json").read_text())
+    assert generated == {
+        "mcpServers": {
+            "docs": {
+                "auth": "bearer",
+                "bearerTokenEnv": "DOCS_TOKEN",
+                "directTools": ["search"],
+                "url": "https://mcp.example.test/mcp",
+            }
+        },
+        "settings": {"hostConfigDiscovery": "off"},
+    }
+    assert spec.environment["DOCS_TOKEN"] == "docs-secret"
+
+
+def test_launch_removes_stale_generated_mcp_files(mantle_home, tmp_path, monkeypatch):
+    paths = setup(mantle_home)
+    bridge = paths.agent("developer") / "extensions/mantle-mcp.ts"
+    bridge.write_text("stale")
+    (paths.agent("developer") / "mantle-mcp.json").write_text("{}")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-secret")
+
+    spec = AgentLauncher(paths).build("developer", current=tmp_path)
+
+    assert not bridge.exists()
+    assert not (paths.agent("developer") / "mantle-mcp.json").exists()
+    assert str(bridge) not in spec.command
