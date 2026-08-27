@@ -56,6 +56,7 @@ def test_install_reconstructs_complete_agent(mantle_home):
     assert (paths.agent("developer") / "packages/tool/source").is_file()
     assert AgentStore(paths).get("developer").agent.description == "First"
     assert paths.yaml("developer").read_text() == cloud_yaml
+    assert (paths.agent("developer") / "models.json").read_text() == '{\n  "providers": {}\n}\n'
 
 
 def test_update_adds_and_removes_resources_and_preserves_local_state(mantle_home):
@@ -64,6 +65,7 @@ def test_update_adds_and_removes_resources_and_preserves_local_state(mantle_home
     manager.install(desired(skills=("alpha",), packages=("old",)))
     (paths.agent("developer") / "context/local.md").write_text("private local context")
     (paths.agent("developer") / "sessions/session.jsonl").write_text("{}")
+    (paths.agent("developer") / "models.json").write_text("{}\n")
     manager.update(desired("Second", skills=("beta",), packages=("new",)))
     root = paths.agent("developer")
     assert not (root / "skills/alpha").exists()
@@ -72,6 +74,7 @@ def test_update_adds_and_removes_resources_and_preserves_local_state(mantle_home
     assert (root / "packages/new/source").is_file()
     assert (root / "context/local.md").read_text() == "private local context"
     assert (root / "sessions/session.jsonl").is_file()
+    assert (root / "models.json").read_text() == '{\n  "providers": {}\n}\n'
 
 
 def test_failed_update_leaves_existing_agent_untouched(mantle_home):

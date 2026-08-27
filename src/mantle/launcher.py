@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from mantle.agents import AgentStore
+from mantle.agents import AgentStore, normalize_models_config
 from mantle.errors import MantleError
 from mantle.logging import append_event
 from mantle.models import ResourceDefinition
@@ -49,6 +49,7 @@ class AgentLauncher:
         executable = RuntimeManager(self.paths).executable(runtime.version)
         root = resolve_project_root(current, project_root)
         agent_root = self.paths.agent(agent_name)
+        normalize_models_config(agent_root)
         sessions = agent_root / "sessions" / project_id(root)
         sessions.mkdir(parents=True, exist_ok=True)
         command = [

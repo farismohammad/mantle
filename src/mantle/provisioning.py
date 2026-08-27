@@ -4,7 +4,7 @@ import shutil
 import uuid
 from pathlib import Path
 
-from mantle.agents import AgentStore, prepare_agent_root
+from mantle.agents import AgentStore, normalize_models_config, prepare_agent_root
 from mantle.errors import ConflictError, MantleError, NotFoundError
 from mantle.models import AgentConfig
 from mantle.packages import PackageManager
@@ -89,3 +89,4 @@ class Provisioner:
             source = previous / name
             if source.is_file():
                 shutil.copy2(source, staging / name)
+        normalize_models_config(staging)

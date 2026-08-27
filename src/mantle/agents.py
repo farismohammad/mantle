@@ -8,7 +8,7 @@ from mantle.configuration import load_agent_yaml, write_agent_yaml
 from mantle.errors import ConflictError, MantleError, NotFoundError
 from mantle.models import AGENT_NAME_PATTERN, AgentConfig, default_agent_config
 from mantle.paths import MantlePaths
-from mantle.storage import write_json
+from mantle.storage import read_json, write_json
 
 
 AGENT_NAME = re.compile(AGENT_NAME_PATTERN)
@@ -30,11 +30,25 @@ def validate_agent_name(name: str) -> str:
 def prepare_agent_root(root: Path, config: AgentConfig) -> None:
     for child in AGENT_DIRS:
         (root / child).mkdir(parents=True, exist_ok=True)
-    for filename in ("settings.json", "auth.json", "models.json"):
+    for filename in ("settings.json", "auth.json"):
         path = root / filename
         if not path.exists():
             write_json(path, {})
+    normalize_models_config(root)
     write_agent_yaml(root / "agent.yaml", config)
+
+
+def normalize_models_config(root: Path) -> None:
+    """Create Pi's empty model config and repair Mantle's legacy `{}` placeholder."""
+    path = root / "models.json"
+    if path.is_file():
+        try:
+            if read_json(path) != {}:
+                return
+        except (OSError, ValueError):
+            # Leave user-authored invalid files intact so Pi can report the error.
+            return
+    write_json(path, {"providers": {}})
 
 
 class AgentStore:

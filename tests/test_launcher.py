@@ -40,3 +40,14 @@ def test_launch_isolated_with_declared_secret_and_project_context(mantle_home, t
     assert not any(str(project / ".pi") in value for value in spec.command)
     assert spec.command[spec.command.index("--provider") + 1] == "openai"
     assert spec.command[spec.command.index("--model") + 1] == "gpt-5.6"
+
+
+def test_launch_repairs_legacy_empty_models_config(mantle_home, tmp_path, monkeypatch):
+    paths = setup(mantle_home)
+    models = paths.agent("developer") / "models.json"
+    write_json(models, {})
+    monkeypatch.setenv("OPENAI_API_KEY", "test-secret")
+
+    AgentLauncher(paths).build("developer", current=tmp_path)
+
+    assert models.read_text() == '{\n  "providers": {}\n}\n'
