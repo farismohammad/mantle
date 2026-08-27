@@ -65,11 +65,25 @@ Or write `~/.mantle/config.json`:
 ```json
 {
   "schema_version": 1,
-  "cloud_url": "http://mantle.local"
+  "cloud_url": "http://mantle.local",
+  "cloud_insecure": false
 }
 ```
 
 Cloud has no Mantle login or authentication layer. Keep it on a trusted private network or protect it at your reverse proxy.
+
+If a development or private Cloud instance uses a self-signed certificate, TLS certificate
+verification can be disabled for Mantle Cloud requests:
+
+```bash
+export MANTLE_CLOUD_INSECURE=true
+```
+
+Or set `"cloud_insecure": true` in `~/.mantle/config.json`. The environment variable,
+when set, takes precedence over the config file.
+
+This is insecure and should only be used for instances you trust. Certificate verification
+remains enabled by default.
 
 ## Core workflow
 

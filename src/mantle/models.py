@@ -158,6 +158,7 @@ class RuntimeMetadata(StrictModel):
 class MantleConfig(StrictModel):
     schema_version: int = 1
     cloud_url: str | None = None
+    cloud_insecure: bool = False
     default_runtime: str | None = None
 
 

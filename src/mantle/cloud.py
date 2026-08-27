@@ -11,6 +11,18 @@ from mantle.paths import MantlePaths
 from mantle.storage import load_json
 
 
+def _env_flag(name: str, *, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise MantleError(f"{name} must be one of: 1, true, yes, on, 0, false, no, off.")
+
+
 class CloudClient:
     def __init__(
         self,
@@ -26,7 +38,11 @@ class CloudClient:
                 "Mantle Cloud is not configured. Set MANTLE_CLOUD_URL or cloud_url in ~/.mantle/config.json."
             )
         self.base_url = selected.rstrip("/")
-        self.client = client or httpx.Client(timeout=30, follow_redirects=True)
+        self.client = client or httpx.Client(
+            timeout=30,
+            follow_redirects=True,
+            verify=not _env_flag("MANTLE_CLOUD_INSECURE", default=stored.cloud_insecure),
+        )
 
     def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         try:

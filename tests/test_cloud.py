@@ -6,6 +6,7 @@ import pytest
 from mantle.cloud import CloudClient
 from mantle.errors import MantleError, NotFoundError
 from mantle.paths import MantlePaths
+from mantle.storage import write_json
 
 
 def test_cloud_client_uploads_only_yaml_and_reads_latest(mantle_home):
@@ -42,3 +43,73 @@ def test_cloud_errors_are_actionable(mantle_home):
     client = CloudClient(MantlePaths.discover(), base_url="http://cloud.test", client=httpx.Client(transport=httpx.MockTransport(invalid)))
     with pytest.raises(MantleError, match="runtime.name: must be pi"):
         client.put("demo", "invalid")
+
+
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on"])
+def test_cloud_client_can_disable_tls_verification(mantle_home, monkeypatch, value):
+    seen = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+    monkeypatch.setenv("MANTLE_CLOUD_INSECURE", value)
+    monkeypatch.setattr("mantle.cloud.httpx.Client", FakeClient)
+
+    CloudClient(MantlePaths.discover(), base_url="https://cloud.test")
+
+    assert seen["verify"] is False
+
+
+def test_cloud_client_verifies_tls_by_default(mantle_home, monkeypatch):
+    seen = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+    monkeypatch.delenv("MANTLE_CLOUD_INSECURE", raising=False)
+    monkeypatch.setattr("mantle.cloud.httpx.Client", FakeClient)
+
+    CloudClient(MantlePaths.discover(), base_url="https://cloud.test")
+
+    assert seen["verify"] is True
+
+
+def test_cloud_client_can_disable_tls_verification_in_config(mantle_home, monkeypatch):
+    seen = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+    write_json(mantle_home / "config.json", {"cloud_insecure": True})
+    monkeypatch.delenv("MANTLE_CLOUD_INSECURE", raising=False)
+    monkeypatch.setattr("mantle.cloud.httpx.Client", FakeClient)
+
+    CloudClient(MantlePaths.discover(), base_url="https://cloud.test")
+
+    assert seen["verify"] is False
+
+
+def test_cloud_insecure_environment_variable_overrides_config(mantle_home, monkeypatch):
+    seen = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+    write_json(mantle_home / "config.json", {"cloud_insecure": True})
+    monkeypatch.setenv("MANTLE_CLOUD_INSECURE", "false")
+    monkeypatch.setattr("mantle.cloud.httpx.Client", FakeClient)
+
+    CloudClient(MantlePaths.discover(), base_url="https://cloud.test")
+
+    assert seen["verify"] is True
+
+
+def test_cloud_client_rejects_invalid_insecure_flag(mantle_home, monkeypatch):
+    monkeypatch.setenv("MANTLE_CLOUD_INSECURE", "sometimes")
+
+    with pytest.raises(MantleError, match="MANTLE_CLOUD_INSECURE must be one of"):
+        CloudClient(MantlePaths.discover(), base_url="https://cloud.test")
