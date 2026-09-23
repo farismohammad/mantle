@@ -1,3 +1,31 @@
+# Mantle
+
+A lightweight system for creating and managing specialized AI agents through configuration, reusable skills, packages, and a CLI.
+
+## Project status
+
+Mantle is in early development and this repository is currently private. An open-source release is intended, but is not yet published. Installation from this repository requires access.
+
+## Why Mantle exists
+
+Specialized agents need a repeatable way to carry their configuration and tools between machines. Mantle keeps the agent definition in an editable `agent.yaml` and associates it with its own skills, packages, context, and sessions. The current runtime is Pi.
+
+An agent is a named local configuration and working environment, not a separately trained model or an operating-system sandbox. Skills supply reusable instructions; packages and MCP servers extend the tools available to the runtime.
+
+The CLI supports local creation and use. The optional, self-hosted Mantle Cloud stores agent definitions and revision history: `mantle push` uploads the YAML, `mantle install` retrieves an agent, and `mantle update` retrieves its latest declarative state. The Cloud service is a separate component; the configuration below assumes an existing instance.
+
+## Contributing during development
+
+For contributors with repository access, discuss substantial changes in an issue before implementation. Include a description of the behavior changed, focused tests, and any documentation updates in a pull request. The development commands below show how to run the test suite.
+
+Before a public release, validate installation on a clean machine, document Cloud deployment and compatibility, review dependencies and repository history for publishability, and establish a supported release process.
+
+## License
+
+No license file is currently included in this repository. Public availability and open-source licensing are separate decisions; an explicit license must be selected and added before an open-source release.
+
+---
+
 # Mantle CLI
 
 Mantle creates reproducible, isolated Pi agents on your own machines. Each agent is declared by one editable `agent.yaml`; a self-hosted Mantle Cloud can retain that file and its immutable revision history.
