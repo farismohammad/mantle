@@ -28,6 +28,8 @@ def parse_dotenv(path: Path) -> dict[str, str]:
 
 
 def declared_secret_environment(path: Path, names: list[str]) -> dict[str, str]:
+    if not names:
+        return {}
     local = parse_dotenv(path)
     selected: dict[str, str] = {}
     missing = []

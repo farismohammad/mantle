@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from mantle.agents import AgentStore
+from mantle.errors import MantleError
 from mantle.launcher import AgentLauncher
-from mantle.models import McpServerDefinition, RuntimeMetadata
+from mantle.models import McpServerDefinition, ResourceDefinition, RuntimeMetadata
 from mantle.paths import MantlePaths
 from mantle.storage import write_json
 
@@ -53,6 +56,118 @@ def test_launch_repairs_legacy_empty_models_config(mantle_home, tmp_path, monkey
     AgentLauncher(paths).build("developer", current=tmp_path)
 
     assert models.read_text() == '{\n  "providers": {}\n}\n'
+
+
+def test_launch_keeps_only_declared_secrets_and_ignores_pi_overrides(
+    mantle_home, tmp_path, monkeypatch
+):
+    paths = setup(mantle_home)
+    monkeypatch.setenv("OPENAI_API_KEY", "declared-secret")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "undeclared-secret")
+    monkeypatch.setenv("PI_PACKAGE_DIR", "/host/pi-package")
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", "/host/pi-agent")
+    monkeypatch.setenv("PI_HOST_OVERRIDE", "host-value")
+    monkeypatch.setenv("PATH", "/bin")
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example.test")
+    monkeypatch.setenv("LC_ALL", "C.UTF-8")
+
+    spec = AgentLauncher(paths).build("developer", current=tmp_path)
+
+    assert spec.environment["OPENAI_API_KEY"] == "declared-secret"
+    assert "ANTHROPIC_API_KEY" not in spec.environment
+    assert spec.environment["PATH"] == "/bin"
+    assert spec.environment["HTTP_PROXY"] == "http://proxy.example.test"
+    assert spec.environment["LC_ALL"] == "C.UTF-8"
+    assert spec.environment["PI_CODING_AGENT_DIR"] == str(paths.agent("developer"))
+    assert spec.environment["PI_CODING_AGENT_SESSION_DIR"] == str(spec.session_dir)
+    assert {key for key in spec.environment if key.startswith("PI_")} == {
+        "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR", "PI_TELEMETRY",
+        "PI_SKIP_VERSION_CHECK",
+    }
+
+
+def test_launch_rejects_session_directory_symlink_escape(mantle_home, tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-secret")
+    paths = setup(mantle_home)
+    session_root = paths.agent("developer") / "sessions"
+    session_root.rmdir()
+    outside = tmp_path / "outside-sessions"
+    outside.mkdir()
+    session_root.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(MantleError, match="outside its isolated directory"):
+        AgentLauncher(paths).build("developer", current=tmp_path)
+
+    assert list(outside.iterdir()) == []
+
+
+def test_launch_rejects_context_symlink_escape(mantle_home, tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-secret")
+    paths = setup(mantle_home)
+    outside = tmp_path / "outside.md"
+    outside.write_text("private instructions")
+    (paths.agent("developer") / "context/private.md").symlink_to(outside)
+
+    with pytest.raises(MantleError, match="outside its isolated directory"):
+        AgentLauncher(paths).build("developer", current=tmp_path)
+
+
+@pytest.mark.parametrize("filename", ["agent.yaml", "settings.json", "auth.json", "models.json"])
+def test_launch_rejects_pi_config_symlink_escape(
+    mantle_home, tmp_path, monkeypatch, filename
+):
+    paths = setup(mantle_home)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-secret")
+    selected = paths.agent("developer") / filename
+    outside = tmp_path / filename
+    if filename == "agent.yaml":
+        selected.replace(outside)
+        selected.symlink_to(outside)
+    else:
+        outside.write_text("{}\n")
+        selected.unlink()
+        selected.symlink_to(outside)
+
+    with pytest.raises(MantleError, match="outside its isolated directory"):
+        AgentLauncher(paths).build("developer", current=tmp_path)
+
+
+def test_launch_rejects_nested_skill_symlink_escape(mantle_home, tmp_path, monkeypatch):
+    paths = setup(mantle_home)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-secret")
+    skill_root = paths.agent("developer") / "skills/docs"
+    skill_root.mkdir()
+    (skill_root / "SKILL.md").write_text("---\nname: docs\n---\n")
+    outside = tmp_path / "outside.md"
+    outside.write_text("private instructions")
+    (skill_root / "references").mkdir()
+    (skill_root / "references/private.md").symlink_to(outside)
+    config = AgentStore(paths).get("developer")
+    config.resources.skills = [ResourceDefinition(name="docs", source="https://example.test/docs")]
+    AgentStore(paths).save(config)
+
+    with pytest.raises(MantleError, match="outside its isolated directory"):
+        AgentLauncher(paths).build("developer", current=tmp_path)
+
+
+def test_launch_rejects_nested_package_resource_symlink_escape(mantle_home, tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-secret")
+    paths = setup(mantle_home)
+    package_root = paths.agent("developer") / "npm/node_modules/demo"
+    extension_dir = package_root / "extensions"
+    extension_dir.mkdir(parents=True)
+    outside = tmp_path / "outside.ts"
+    outside.write_text("export default () => {};\n")
+    (extension_dir / "nested.ts").symlink_to(outside)
+    (package_root / "package.json").write_text(json.dumps({
+        "name": "demo", "pi": {"extensions": ["extensions/**/*.ts"]},
+    }))
+    config = AgentStore(paths).get("developer")
+    config.resources.packages = [ResourceDefinition(name="demo", source="npm:demo")]
+    AgentStore(paths).save(config)
+
+    with pytest.raises(MantleError, match="outside its isolated directory"):
+        AgentLauncher(paths).build("developer", current=tmp_path)
 
 
 def test_launch_uses_only_agent_declared_mcp_config(mantle_home, tmp_path, monkeypatch):

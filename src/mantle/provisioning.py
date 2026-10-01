@@ -42,7 +42,7 @@ class Provisioner:
 
     def update(self, config: AgentConfig, *, yaml_text: str | None = None) -> None:
         name = config.agent.name
-        if not self.agents.exists(name):
+        if not self.paths.agent(name).is_dir():
             raise NotFoundError(f'Agent "{name}" is not installed locally. Use mantle install {name}.')
         self._replace(config, previous=self.paths.agent(name), yaml_text=yaml_text)
 
@@ -52,6 +52,7 @@ class Provisioner:
         staging = self.paths.agents / f".{name}.staging-{uuid.uuid4().hex}"
         backup = self.paths.agents / f".{name}.backup-{uuid.uuid4().hex}"
         target = self.paths.agent(name)
+        previous_settings = self.paths.config.read_text(encoding="utf-8") if self.paths.config.is_file() else None
         try:
             prepare_agent_root(staging, config)
             if yaml_text is not None:
@@ -73,12 +74,21 @@ class Provisioner:
                 except OSError:
                     # The new agent is already active; a stale hidden backup is safer than rollback.
                     pass
-        except Exception as error:
+        except BaseException as error:
             if backup.exists() and not target.exists():
                 backup.rename(target)
             if staging.exists():
                 shutil.rmtree(staging)
-            if isinstance(error, MantleError):
+            # Refreshing latest can select a shared default before resources
+            # finish installing. A failed reconstruction must not switch other
+            # agents to a different runtime.
+            current_settings = self.paths.config.read_text(encoding="utf-8") if self.paths.config.is_file() else None
+            if current_settings != previous_settings:
+                if previous_settings is None:
+                    self.paths.config.unlink(missing_ok=True)
+                else:
+                    atomic_write_text(self.paths.config, previous_settings)
+            if isinstance(error, (MantleError, KeyboardInterrupt, SystemExit)):
                 raise
             raise MantleError(f'Could not reconstruct agent "{name}": {error}') from error
 

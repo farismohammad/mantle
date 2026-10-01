@@ -1,0 +1,33 @@
+name: CLI tests
+on: [push, pull_request]
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ['3.11', '3.12', '3.13']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv sync --extra test --locked
+      - run: uv run pytest
+      - run: sh -n install.sh
+      - run: uv build
+  real-pi-isolation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.12'
+      - run: uv sync --extra test --locked
+      - name: Verify isolation with the supported Pi runtime
+        env:
+          MANTLE_RUN_REAL_PI_TEST: '1'
+        run: uv run pytest tests/test_real_pi_isolation.py

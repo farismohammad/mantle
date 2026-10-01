@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import shutil
+import re
 import subprocess
 import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from pathlib import Path
 
 from mantle.agents import AgentStore
 from mantle.errors import ConflictError, MantleError, NotFoundError
-from mantle.models import MantleConfig, RuntimeMetadata
+from mantle.models import MantleConfig, RuntimeMetadata, RUNTIME_VERSION_PATTERN
 from mantle.paths import MantlePaths
+from mantle.processes import run_installer
 from mantle.storage import load_json, read_json, write_json
 
 PI_PACKAGE = "@earendil-works/pi-coding-agent"
@@ -17,7 +19,7 @@ Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 
 class RuntimeManager:
-    def __init__(self, paths: MantlePaths, runner: Runner = subprocess.run):
+    def __init__(self, paths: MantlePaths, runner: Runner = run_installer):
         self.paths = paths
         self.runner = runner
 
@@ -31,6 +33,7 @@ class RuntimeManager:
         result = self.runner(
             ["npm", "view", PI_PACKAGE, "version", "--json"],
             check=False, capture_output=True, text=True,
+            timeout=60,
         )
         if result.returncode != 0:
             detail = result.stderr.strip() or "npm could not resolve the package"
@@ -41,16 +44,25 @@ class RuntimeManager:
         return version
 
     def install(self, version: str | None = None) -> RuntimeMetadata:
-        selected = version or self.latest_version()
+        selected = self.latest_version() if version is None or version == "latest" else version
+        self.validate_version(selected)
+        config = self.config()
         destination = self.paths.runtimes / selected
         if (destination / "metadata.json").is_file():
+            self.executable(selected)
+            if config.default_runtime is None:
+                config.default_runtime = selected
+                self.save_config(config)
             return self.get(selected)
+        if destination.exists():
+            raise MantleError(f"Incomplete runtime at {destination}. Move it aside and retry mantle runtime install {selected}.")
         self.paths.runtimes.mkdir(parents=True, exist_ok=True)
         temporary = Path(tempfile.mkdtemp(prefix=f".{selected}.", dir=self.paths.runtimes))
         try:
             result = self.runner(
                 ["npm", "install", "--prefix", str(temporary), "--ignore-scripts", "--no-audit", "--no-fund", f"{PI_PACKAGE}@{selected}"],
                 check=False, capture_output=True, text=True,
+                timeout=300,
             )
             if result.returncode != 0:
                 detail = result.stderr.strip() or "npm install failed"
@@ -61,10 +73,13 @@ class RuntimeManager:
             metadata = RuntimeMetadata(version=selected)
             write_json(temporary / "metadata.json", metadata.model_dump(mode="json"))
             temporary.rename(destination)
-            config = self.config()
             if config.default_runtime is None:
                 config.default_runtime = selected
-                self.save_config(config)
+                try:
+                    self.save_config(config)
+                except BaseException:
+                    shutil.rmtree(destination)
+                    raise
             return metadata
         finally:
             if temporary.exists():
@@ -74,16 +89,31 @@ class RuntimeManager:
         if not self.paths.runtimes.is_dir():
             return []
         return [
-            RuntimeMetadata.model_validate(read_json(path / "metadata.json"))
+            self.get(path.name)
             for path in sorted(self.paths.runtimes.iterdir())
-            if (path / "metadata.json").is_file()
+            if not path.name.startswith(".") and (path / "metadata.json").is_file()
         ]
 
     def get(self, version: str) -> RuntimeMetadata:
+        self.validate_version(version)
         path = self.paths.runtimes / version / "metadata.json"
         if not path.is_file():
             raise NotFoundError(f"Runtime pi@{version} is not installed.")
-        return RuntimeMetadata.model_validate(read_json(path))
+        data = read_json(path)
+        legacy = isinstance(data, dict) and "installed_at" in data
+        if legacy:
+            data = {key: value for key, value in data.items() if key != "installed_at"}
+        metadata = RuntimeMetadata.model_validate(data)
+        if metadata.version != version:
+            raise MantleError(f"Runtime metadata at {path} declares {metadata.version}, not {version}.")
+        if legacy:
+            write_json(path, metadata.model_dump(mode="json"))
+        return metadata
+
+    @staticmethod
+    def validate_version(version: str) -> None:
+        if not re.fullmatch(RUNTIME_VERSION_PATTERN, version):
+            raise MantleError("Runtime version must be a Pi version or npm tag, such as 1.0.0 or latest.")
 
     def executable(self, version: str) -> Path:
         self.get(version)
@@ -119,11 +149,21 @@ class RuntimeManager:
 
     def remove(self, version: str) -> None:
         self.get(version)
-        users = [agent.agent.name for agent in AgentStore(self.paths).list() if agent.runtime.version == version]
+        config = self.config()
+        users = [agent.agent.name for agent in AgentStore(self.paths).list()
+                 if agent.runtime.version == version or
+                 (agent.runtime.version == "latest" and config.default_runtime == version)]
         if users:
             raise ConflictError(f"Cannot remove pi@{version}; it is used by: {', '.join(users)}.")
-        shutil.rmtree(self.paths.runtimes / version)
-        config = self.config()
-        if config.default_runtime == version:
-            config.default_runtime = None
-            self.save_config(config)
+        target = self.paths.runtimes / version
+        backup = Path(tempfile.mkdtemp(prefix=".remove-", dir=self.paths.runtimes))
+        target.rename(backup / version)
+        try:
+            if config.default_runtime == version:
+                config.default_runtime = None
+                self.save_config(config)
+        except BaseException:
+            (backup / version).rename(target)
+            backup.rmdir()
+            raise
+        shutil.rmtree(backup)

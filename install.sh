@@ -6,6 +6,7 @@ PROGRAM=${0##*/}
 SOURCE=${MANTLE_SOURCE:-}
 REF=${MANTLE_REF:-}
 TEMP_DIR=
+ORIGINAL_PATH=${PATH-}
 
 usage() {
     cat <<EOF
@@ -16,14 +17,14 @@ Usage:
 
 Options:
   --source  Repository checkout, package directory, or Git URL.
-            Defaults to the checkout containing this script, or MANTLE_SOURCE.
+            Defaults to this CLI checkout, or MANTLE_SOURCE.
   --ref     Branch or tag to clone when --source is a Git URL.
             MANTLE_REF provides the same setting.
   -h, --help
 
 Examples:
   ./install.sh
-  ./install.sh --source https://github.com/farismohammad/mantle.git --ref main
+  ./install.sh --source https://github.com/farismohammad/mantle.git --ref v0.1.0
 EOF
 }
 
@@ -67,9 +68,20 @@ case "$(uname -s)" in
     *) fail "only Linux and macOS are supported" ;;
 esac
 
-command -v git >/dev/null 2>&1 || fail "Git is required; install it and run this script again"
-command -v node >/dev/null 2>&1 || fail "Node.js is required; install it and run this script again"
-command -v npm >/dev/null 2>&1 || fail "npm is required; install it and run this script again"
+command -v git >/dev/null 2>&1 || fail "Git is required for resource sources and remote installs; install Git and retry"
+command -v node >/dev/null 2>&1 || fail "Node.js 22.20.0 or newer is required; install Node.js and npm, then retry"
+NODE_VERSION=$(node --version 2>/dev/null || true)
+NODE_VERSION=${NODE_VERSION#v}
+if ! printf '%s\n' "$NODE_VERSION" | awk '
+    /^[0-9]+\.[0-9]+\.[0-9]+$/ {
+        split($0, v, ".")
+        if (v[1] > 22 || (v[1] == 22 && (v[2] > 20 || (v[2] == 20 && v[3] >= 0)))) exit 0
+    }
+    { exit 1 }
+'; then
+    fail "Node.js 22.20.0 or newer is required; found ${NODE_VERSION:-an unknown version}. Install Node.js and npm, then retry"
+fi
+command -v npm >/dev/null 2>&1 || fail "npm is required with Node.js 22.20.0 or newer; install npm and retry"
 
 if [ -z "$SOURCE" ]; then
     SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || true)
@@ -120,7 +132,7 @@ fi
 command -v uv >/dev/null 2>&1 || fail "uv was installed but is not available on PATH"
 
 printf 'Installing Mantle CLI...\n'
-uv tool install --force "$CHECKOUT"
+uv tool install --force --reinstall-package mantle-agent-cli "$CHECKOUT"
 
 if [ -n "${UV_TOOL_BIN_DIR:-}" ]; then
     TOOL_BIN=$UV_TOOL_BIN_DIR
@@ -133,8 +145,8 @@ MANTLE_BIN=$TOOL_BIN/mantle
 "$MANTLE_BIN" --help >/dev/null
 
 printf '\nMantle was installed successfully: %s\n' "$MANTLE_BIN"
-case ":$PATH:" in
+case ":$ORIGINAL_PATH:" in
     *:"$TOOL_BIN":*) ;;
-    *) printf 'Add %s to PATH before running mantle.\n' "$TOOL_BIN" ;;
+    *) printf 'Add Mantle to PATH in your shell profile: export PATH="%s:$PATH"\n' "$TOOL_BIN" ;;
 esac
 printf 'Run "mantle --help" to get started.\n'

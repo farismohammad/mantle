@@ -19,10 +19,10 @@ AGENT_DIRS = (
 
 
 def validate_agent_name(name: str) -> str:
-    if not AGENT_NAME.fullmatch(name):
+    if len(name) > 64 or not AGENT_NAME.fullmatch(name):
         raise MantleError(
             "Agent names must contain only lowercase letters, numbers, hyphens, and underscores, "
-            "and cannot begin with a hyphen."
+            "cannot begin with a hyphen, and must be 1–64 characters long."
         )
     return name
 
@@ -45,7 +45,7 @@ def normalize_models_config(root: Path) -> None:
         try:
             if read_json(path) != {}:
                 return
-        except (OSError, ValueError):
+        except (OSError, ValueError, MantleError):
             # Leave user-authored invalid files intact so Pi can report the error.
             return
     write_json(path, {"providers": {}})
@@ -77,12 +77,13 @@ class AgentStore:
         try:
             prepare_agent_root(root, selected)
             return selected
-        except Exception:
+        except BaseException:
             if root.exists():
                 shutil.rmtree(root)
             raise
 
     def save(self, config: AgentConfig) -> None:
+        config = AgentConfig.model_validate(config.model_dump())
         if not self.exists(config.agent.name):
             raise NotFoundError(f'Agent "{config.agent.name}" is not installed locally.')
         write_agent_yaml(self.paths.yaml(config.agent.name), config)
@@ -90,7 +91,9 @@ class AgentStore:
     def get(self, name: str) -> AgentConfig:
         validate_agent_name(name)
         if not self.paths.yaml(name).is_file():
-            raise NotFoundError(f'Agent "{name}" is not installed locally.')
+            if self.paths.agent(name).exists():
+                raise MantleError(f"Agent configuration was not found: {self.paths.yaml(name)}. Restore agent.yaml or remove the damaged agent with: mantle delete {name}")
+            raise NotFoundError(f'Agent "{name}" is not installed locally. Use mantle create {name} or mantle install {name}.')
         return load_agent_yaml(self.paths.yaml(name), expected_name=name)
 
     def list(self) -> list[AgentConfig]:
@@ -103,7 +106,7 @@ class AgentStore:
         return result
 
     def delete(self, name: str, *, keep_sessions: bool = False) -> Path | None:
-        self.get(name)
+        self.require_local(name)
         root = self.paths.agent(name)
         kept: Path | None = None
         if keep_sessions and (root / "sessions").exists():
@@ -114,6 +117,13 @@ class AgentStore:
             shutil.move(root / "sessions", kept)
         shutil.rmtree(root)
         return kept
+
+    def require_local(self, name: str) -> Path:
+        validate_agent_name(name)
+        root = self.paths.agent(name)
+        if not root.is_dir():
+            raise NotFoundError(f'Agent "{name}" is not installed locally.')
+        return root
 
     def project_count(self, name: str) -> int:
         sessions = self.paths.agent(name) / "sessions"

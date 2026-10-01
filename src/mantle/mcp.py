@@ -11,7 +11,6 @@ MCP_ADAPTER_VERSION = "2.29.0"
 MCP_ADAPTER = ResourceDefinition(
     name="pi-mcp-adapter",
     source=f"npm:pi-mcp-adapter@{MCP_ADAPTER_VERSION}",
-    version=MCP_ADAPTER_VERSION,
 )
 MCP_CONFIG_FILENAME = "mantle-mcp.json"
 MCP_EXTENSION_FILENAME = "mantle-mcp.ts"

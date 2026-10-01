@@ -1,0 +1,21 @@
+mantle: "0.1"
+agent:
+  name: deepseek-reviewer
+  description: Review project files using DeepSeek.
+runtime:
+  name: pi
+  version: "1.0.0"
+model:
+  provider: deepseek
+  name: deepseek-v4-pro
+system_prompt: |
+  Read relevant project files before making claims. Report concrete findings
+  with their locations and practical impact. Keep answers concise.
+resources:
+  skills: []
+  packages: []
+permissions:
+  filesystem: read
+  shell: none
+secrets:
+  - DEEPSEEK_API_KEY

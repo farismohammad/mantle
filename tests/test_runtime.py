@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -43,3 +44,20 @@ def test_failed_runtime_install_is_atomic(mantle_home):
     with pytest.raises(MantleError, match="network unavailable"):
         manager.install()
     assert manager.list() == []
+
+
+def test_get_migrates_legacy_installed_at_metadata(mantle_home):
+    path = mantle_home / "runtimes/pi/0.80.10/metadata.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({
+        "schema_version": 1,
+        "name": "pi",
+        "version": "0.80.10",
+        "package": "@earendil-works/pi-coding-agent",
+        "installed_at": "2026-07-20T14:40:00Z",
+    }))
+
+    metadata = RuntimeManager(MantlePaths.discover()).get("0.80.10")
+
+    assert metadata.version == "0.80.10"
+    assert "installed_at" not in json.loads(path.read_text())

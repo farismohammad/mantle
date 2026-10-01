@@ -45,6 +45,81 @@ def test_cloud_errors_are_actionable(mantle_home):
         client.put("demo", "invalid")
 
 
+def test_cloud_client_rejects_url_credentials_without_echoing_them(mantle_home):
+    with pytest.raises(MantleError) as error:
+        CloudClient(
+            MantlePaths.discover(),
+            base_url="https://private-user:private-password@cloud.test",
+        )
+    assert "username or password" in str(error.value)
+    assert "private-user" not in str(error.value)
+    assert "private-password" not in str(error.value)
+
+
+def test_invalid_cloud_url_error_does_not_echo_user_input(mantle_home):
+    with pytest.raises(MantleError) as error:
+        CloudClient(
+            MantlePaths.discover(),
+            base_url="http://private-user:private-password@cloud.test:bad",
+        )
+    assert "private-user" not in str(error.value)
+    assert "private-password" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"data": {}},
+        {"data": [None]},
+        {"data": [{"name": "UPPERCASE"}]},
+        {"data": [{"name": "demo", "revision": True}]},
+    ],
+)
+def test_cloud_client_rejects_malformed_agent_lists(mantle_home, body):
+    client = CloudClient(
+        MantlePaths.discover(),
+        base_url="http://cloud.test",
+        client=httpx.Client(
+            transport=httpx.MockTransport(
+                lambda _: httpx.Response(200, json=body)
+            )
+        ),
+    )
+    with pytest.raises(MantleError, match="invalid agent list response"):
+        client.list()
+
+
+def test_cloud_list_preserves_transport_errors(mantle_home):
+    def unavailable(request):
+        raise httpx.ConnectError("offline", request=request)
+
+    client = CloudClient(
+        MantlePaths.discover(),
+        base_url="http://cloud.test",
+        client=httpx.Client(transport=httpx.MockTransport(unavailable)),
+    )
+    with pytest.raises(MantleError, match="Could not reach Mantle Cloud"):
+        client.list()
+
+
+def test_cloud_delete_validates_name_before_request(mantle_home):
+    requests = []
+    client = CloudClient(
+        MantlePaths.discover(),
+        base_url="http://cloud.test",
+        client=httpx.Client(
+            transport=httpx.MockTransport(
+                lambda request: requests.append(request)
+                or httpx.Response(204)
+            )
+        ),
+    )
+    with pytest.raises(MantleError):
+        client.delete("../demo")
+    assert requests == []
+
+
 @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on"])
 def test_cloud_client_can_disable_tls_verification(mantle_home, monkeypatch, value):
     seen = {}

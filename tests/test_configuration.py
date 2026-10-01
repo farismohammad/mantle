@@ -102,5 +102,5 @@ def test_run_recommends_install_when_agent_exists_only_in_cloud(cli, monkeypatch
     monkeypatch.setattr("mantle.cli.CloudClient", FakeCloud)
     result = cli("run", "research")
     assert result.exit_code == 1
-    assert "available in Mantle Cloud" in result.stdout
-    assert "mantle install research" in result.stdout
+    assert "available in Mantle Cloud" in result.stderr
+    assert "mantle install research" in result.stderr

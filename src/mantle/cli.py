@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from typing import Annotated
 
 import typer
+from pydantic import ValidationError
+from typer.core import TyperCommand
 from rich.console import Console
 from rich.table import Table
 
-from mantle.agents import AgentStore
+from mantle.agents import AgentStore, validate_agent_name
 from mantle.cloud import CloudClient
-from mantle.configuration import parse_agent_yaml
+from mantle.configuration import format_validation_error, load_agent_yaml, parse_agent_yaml
 from mantle.errors import MantleError, NotFoundError
 from mantle.launcher import AgentLauncher
 from mantle.packages import PackageManager
@@ -18,14 +21,44 @@ from mantle.paths import MantlePaths
 from mantle.provisioning import Provisioner
 from mantle.runtimes import RuntimeManager
 from mantle.skills import SkillManager
+from mantle import __version__
 
 
-app = typer.Typer(help="Create, reproduce, and run isolated personal Pi agents.", no_args_is_help=True)
+class UserCommand(TyperCommand):
+    """Keep expected input and filesystem failures consistent at every entrypoint."""
+
+    def invoke(self, ctx):
+        try:
+            return super().invoke(ctx)
+        except ValidationError as error:
+            fail(MantleError(format_validation_error(error)))
+        except subprocess.TimeoutExpired:
+            fail(MantleError("Installation timed out. Check your network connection and retry."))
+        except FileNotFoundError as error:
+            if error.filename in {"npm", "npx"}:
+                fail(MantleError(f"Required program {error.filename!r} was not found. Install Node.js/npm and ensure it is on PATH."))
+            fail(error)
+        except (MantleError, OSError, UnicodeError) as error:
+            fail(error)
+
+
+app = typer.Typer(help="Create, reproduce, and run isolated personal Pi agents.", no_args_is_help=True, pretty_exceptions_enable=False)
 runtime_app = typer.Typer(help="Manage Mantle's shared Pi runtime cache.", no_args_is_help=True)
 skills_app = typer.Typer(help="Manage agent skills.", no_args_is_help=True)
 app.add_typer(runtime_app, name="runtime")
 app.add_typer(skills_app, name="skills")
-console = Console()
+console = Console(markup=False, highlight=False)
+
+
+def show_version(value: bool) -> None:
+    if value:
+        typer.echo(f"mantle {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def options(version: Annotated[bool, typer.Option("--version", callback=show_version, is_eager=True, help="Show Mantle's version and exit.")] = False) -> None:
+    pass
 
 
 def paths() -> MantlePaths:
@@ -36,26 +69,26 @@ def store() -> AgentStore:
     return AgentStore(paths())
 
 
-def fail(error: MantleError) -> None:
-    console.print(f"[red]Error:[/red] {error}", highlight=False)
+def fail(error: Exception) -> None:
+    typer.echo(f"Error: {error}", err=True)
     raise typer.Exit(1)
 
 
-@app.command("create")
+@app.command("create", cls=UserCommand)
 def create_agent(
     name: str,
     description: Annotated[str, typer.Option(help="Human-readable purpose.")] = "",
-    runtime_version: Annotated[str, typer.Option("--runtime-version")] = "latest",
+    runtime_version: Annotated[str, typer.Option("--runtime-version", help="Pi version or npm tag to use.")] = "latest",
 ) -> None:
     """Create a local agent. Nothing is sent to Mantle Cloud."""
     try:
         store().create(name, description=description, runtime_version=runtime_version)
     except MantleError as error:
         fail(error)
-    console.print(f"Created local agent: [bold]{name}[/bold]\n  {paths().yaml(name)}")
+    console.print(f"Created local agent: {name}\n  {paths().yaml(name)}")
 
 
-@app.command("list")
+@app.command("list", cls=UserCommand)
 def list_agents(as_json: Annotated[bool, typer.Option("--json")] = False) -> None:
     """List locally installed agents."""
     try:
@@ -64,6 +97,9 @@ def list_agents(as_json: Annotated[bool, typer.Option("--json")] = False) -> Non
         fail(error)
     if as_json:
         typer.echo(json.dumps([item.model_dump(mode="json") for item in agents], indent=2))
+        return
+    if not agents:
+        console.print("No local agents. Create one with: mantle create <name>\nInstall a Cloud agent with: mantle install <name>")
         return
     table = Table("AGENT", "MODEL", "RUNTIME", "SKILLS", "PACKAGES", "MCP", "LOCATION")
     for item in agents:
@@ -79,15 +115,15 @@ def list_agents(as_json: Annotated[bool, typer.Option("--json")] = False) -> Non
     console.print(table)
 
 
-@app.command("delete")
+@app.command("delete", cls=UserCommand)
 def delete_agent(
     name: str,
-    yes: Annotated[bool, typer.Option("--yes", "-y")] = False,
-    keep_sessions: Annotated[bool, typer.Option("--keep-sessions")] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the local deletion confirmation.")] = False,
+    keep_sessions: Annotated[bool, typer.Option("--keep-sessions", help="Move sessions to MANTLE_HOME/retained-sessions before deleting.")] = False,
 ) -> None:
     """Delete a local agent. The Cloud copy is untouched."""
     try:
-        store().get(name)
+        store().require_local(name)
         if not yes and not typer.confirm(f'Delete local agent "{name}"?', default=False):
             raise typer.Abort()
         kept = store().delete(name, keep_sessions=keep_sessions)
@@ -98,7 +134,7 @@ def delete_agent(
         console.print(f"Sessions retained at: {kept}")
 
 
-@app.command("push")
+@app.command("push", cls=UserCommand)
 def push_agent(name: str) -> None:
     """Validate and explicitly upload only agent.yaml to Mantle Cloud."""
     try:
@@ -114,10 +150,13 @@ def push_agent(name: str) -> None:
         console.print(f"Cloud already has this exact configuration (revision {result['revision']['number']}).")
 
 
-@app.command("install")
+@app.command("install", cls=UserCommand)
 def install_agent(name: str) -> None:
     """Reconstruct a new local agent from the latest Cloud revision."""
     try:
+        validate_agent_name(name)
+        if paths().agent(name).exists():
+            fail(MantleError(f'Agent "{name}" already exists locally. Use mantle update {name}.'))
         remote = CloudClient(paths()).latest(name)
         config = parse_agent_yaml(remote["yaml"], expected_name=name)
         Provisioner(paths()).install(config, yaml_text=remote["yaml"])
@@ -126,11 +165,11 @@ def install_agent(name: str) -> None:
     console.print(f"Installed {name} from Cloud revision {remote['revision']['number']}.")
 
 
-@app.command("update")
+@app.command("update", cls=UserCommand)
 def update_agent(name: str) -> None:
     """Replace local reconstructible state with the latest Cloud configuration."""
     try:
-        store().get(name)
+        store().require_local(name)
         remote = CloudClient(paths()).latest(name)
         config = parse_agent_yaml(remote["yaml"], expected_name=name)
         Provisioner(paths()).update(config, yaml_text=remote["yaml"])
@@ -139,32 +178,34 @@ def update_agent(name: str) -> None:
     console.print(f"Updated {name} to Cloud revision {remote['revision']['number']}.")
 
 
-@app.command("run", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+@app.command("run", cls=UserCommand, context_settings={"allow_extra_args": True})
 def run_agent(
     context: typer.Context,
     name: str,
-    project_root: Annotated[Path | None, typer.Option("--project-root")] = None,
-    new_session: Annotated[bool, typer.Option("--new-session")] = False,
-    session: Annotated[str | None, typer.Option("--session")] = None,
-    no_project_context: Annotated[bool, typer.Option("--no-project-context")] = False,
-    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    project_root: Annotated[Path | None, typer.Option("--project-root", help="Project directory containing the current directory (default: cwd).")] = None,
+    new_session: Annotated[bool, typer.Option("--new-session", help="Start fresh; this is the default.")] = False,
+    session: Annotated[str | None, typer.Option("--session", help="Resume a session ID or file for this agent and project.")] = None,
+    no_project_context: Annotated[bool, typer.Option("--no-project-context", help="Omit root AGENTS.md and CLAUDE.md instructions.")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Prepare and print the launch as JSON without starting Pi.")] = False,
 ) -> None:
-    """Run an installed agent locally. Remote agents are never auto-installed."""
+    """Run a local agent. Pass Pi options after --, e.g. -- --print 'Hello'."""
     if new_session and session:
         fail(MantleError("--new-session and --session cannot be used together."))
     if not store().exists(name):
+        if paths().agent(name).exists():
+            store().get(name)
         try:
             if CloudClient(paths()).exists(name):
-                console.print(
+                typer.echo(
                     f"Agent '{name}' is available in Mantle Cloud but is not installed locally.\n\n"
-                    f"Install it with:\n\n  mantle install {name}"
+                    f"Install it with:\n\n  mantle install {name}", err=True
                 )
                 raise typer.Exit(1)
         except NotFoundError:
             pass
         except MantleError as error:
-            fail(error)
-        fail(NotFoundError(f'Agent "{name}" was not found locally or in Mantle Cloud.'))
+            fail(MantleError(f'Agent "{name}" is not installed locally. {error}\nCreate it with: mantle create {name}\nOr configure Cloud and run: mantle install {name}'))
+        fail(NotFoundError(f'Agent "{name}" was not found locally or in Mantle Cloud. Create it with: mantle create {name}'))
     forwarded = list(context.args)
     if forwarded and forwarded[0] == "--":
         forwarded = forwarded[1:]
@@ -195,12 +236,12 @@ def run_agent(
     raise typer.Exit(AgentLauncher(paths()).run(spec))
 
 
-@skills_app.command("add")
+@skills_app.command("add", cls=UserCommand)
 def add_skill(
     source: str,
     skill: Annotated[str, typer.Option("--skill", help="Skill directory/name within the source.")],
     agent: Annotated[str, typer.Option("--agent", help="Agent to install the skill into.")],
-    force: Annotated[bool, typer.Option("--force")] = False,
+    force: Annotated[bool, typer.Option("--force", help="Replace an existing skill of the same name.")] = False,
 ) -> None:
     """Install a skill from its source and update local agent.yaml only."""
     try:
@@ -210,7 +251,7 @@ def add_skill(
     console.print(f"Installed skill {record.name} into {agent}. agent.yaml changed locally; Cloud was not updated.")
 
 
-@app.command("remove-skill")
+@app.command("remove-skill", cls=UserCommand)
 def remove_skill(skill: str, agent: str) -> None:
     """Remove an agent skill and its local YAML declaration."""
     try:
@@ -220,12 +261,12 @@ def remove_skill(skill: str, agent: str) -> None:
     console.print(f"Removed skill {skill} from {agent}. Cloud was not updated.")
 
 
-@app.command("add-package")
+@app.command("add-package", cls=UserCommand)
 def add_package(
     source: str,
     agent: str,
-    name: Annotated[str | None, typer.Option("--name")] = None,
-    force: Annotated[bool, typer.Option("--force")] = False,
+    name: Annotated[str | None, typer.Option("--name", help="Local resource name (default: derived from source).")] = None,
+    force: Annotated[bool, typer.Option("--force", help="Replace an existing package of the same name.")] = False,
 ) -> None:
     """Install a Pi package from its source and update local agent.yaml only."""
     try:
@@ -235,7 +276,7 @@ def add_package(
     console.print(f"Installed package {record.name} into {agent}. agent.yaml changed locally; Cloud was not updated.")
 
 
-@app.command("remove-package")
+@app.command("remove-package", cls=UserCommand)
 def remove_package(name: str, agent: str) -> None:
     """Remove a Pi package and its local YAML declaration."""
     try:
@@ -245,27 +286,31 @@ def remove_package(name: str, agent: str) -> None:
     console.print(f"Removed package {name} from {agent}. Cloud was not updated.")
 
 
-@app.command("validate")
+@app.command("validate", cls=UserCommand)
 def validate(path: Path) -> None:
     """Validate YAML syntax and the Mantle schema."""
     try:
-        config = parse_agent_yaml(path.read_text(encoding="utf-8"))
+        config = load_agent_yaml(path.expanduser())
     except (MantleError, OSError) as error:
         fail(error if isinstance(error, MantleError) else MantleError(str(error)))
     console.print(f"Valid Mantle configuration for {config.agent.name}.")
 
 
-@runtime_app.command("install")
+@runtime_app.command("install", cls=UserCommand)
 def install_runtime(version: Annotated[str, typer.Argument()] = "latest") -> None:
+    """Install and cache a Pi version (default: latest from npm)."""
     try:
-        metadata = RuntimeManager(paths()).install(None if version in ("latest", "pi") else version.removeprefix("pi@"))
+        version = version.removeprefix("pi@")
+        RuntimeManager.validate_version(version)
+        metadata = RuntimeManager(paths()).install(None if version in ("latest", "pi") else version)
     except MantleError as error:
         fail(error)
     console.print(f"Installed runtime: pi@{metadata.version}")
 
 
-@runtime_app.command("list")
+@runtime_app.command("list", cls=UserCommand)
 def list_runtimes() -> None:
+    """List cached Pi versions and the default used by latest agents."""
     table = Table("RUNTIME", "DEFAULT")
     manager = RuntimeManager(paths())
     default = manager.config().default_runtime
@@ -274,8 +319,9 @@ def list_runtimes() -> None:
     console.print(table)
 
 
-@runtime_app.command("remove")
+@runtime_app.command("remove", cls=UserCommand)
 def remove_runtime(version: str) -> None:
+    """Remove an unused cached Pi version."""
     try:
         RuntimeManager(paths()).remove(version.removeprefix("pi@"))
     except MantleError as error:

@@ -1,0 +1,18 @@
+mantle: "0.1"
+agent:
+  name: local-assistant
+  description: A local model agent configured through agent-local models.json.
+runtime:
+  name: pi
+  version: "1.0.0"
+model:
+  provider: local
+  name: your-local-model
+system_prompt: Explain your observations clearly and ask before making changes.
+resources:
+  skills: []
+  packages: []
+permissions:
+  filesystem: read
+  shell: none
+secrets: []

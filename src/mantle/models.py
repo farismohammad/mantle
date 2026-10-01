@@ -9,12 +9,14 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_vali
 AGENT_NAME_PATTERN = r"^[a-z0-9_][a-z0-9_-]*$"
 SECRET_NAME_PATTERN = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 MCP_SERVER_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+RUNTIME_VERSION_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$"
+RESOURCE_NAME_PATTERN = r"^(?:@[A-Za-z0-9_-]+/)?[A-Za-z0-9_][A-Za-z0-9_.-]*$"
 SecretName = Annotated[str, StringConstraints(pattern=SECRET_NAME_PATTERN.pattern)]
 McpServerName = Annotated[str, StringConstraints(pattern=MCP_SERVER_NAME_PATTERN)]
 
 
 class StrictModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
 
 class AgentDefinition(StrictModel):
@@ -24,7 +26,7 @@ class AgentDefinition(StrictModel):
 
 class RuntimeDefinition(StrictModel):
     name: Literal["pi"] = "pi"
-    version: str = Field(default="latest", min_length=1, max_length=64)
+    version: str = Field(default="latest", min_length=1, max_length=64, pattern=RUNTIME_VERSION_PATTERN)
 
 
 class ModelDefinition(StrictModel):
@@ -33,13 +35,22 @@ class ModelDefinition(StrictModel):
 
 
 class ResourceDefinition(StrictModel):
-    name: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=128, pattern=RESOURCE_NAME_PATTERN)
     source: str = Field(min_length=1, max_length=2_048)
-    version: str | None = Field(default=None, max_length=256)
+    version: None = Field(default=None, description="Deprecated: pin the version in source instead.")
+
+    @field_validator("version", mode="before")
+    @classmethod
+    def no_ignored_version(cls, value):
+        if value is not None:
+            raise ValueError("resource.version was never used for installation; remove it and pin the version in source instead (for example npm:package@1.2.3)")
+        return value
 
     @field_validator("name", "source", "version")
     @classmethod
     def no_control_characters(cls, value: str | None) -> str | None:
+        if value is not None and (not value.strip() or value != value.strip()):
+            raise ValueError("must not be blank or have surrounding whitespace")
         if value is not None and any(ord(character) < 32 for character in value):
             raise ValueError("must not contain control characters")
         return value
@@ -49,10 +60,30 @@ class ResourcesDefinition(StrictModel):
     skills: list[ResourceDefinition] = Field(default_factory=list)
     packages: list[ResourceDefinition] = Field(default_factory=list)
 
+    @field_validator("packages")
+    @classmethod
+    def valid_package_sources(cls, packages):
+        from mantle.errors import MantleError
+        from mantle.sources import validate_package_source
+
+        for index, package in enumerate(packages):
+            try:
+                validate_package_source(package.source)
+            except MantleError as error:
+                raise ValueError(f"resources.packages.{index}.source: {error}") from error
+        return packages
+
 
 class PermissionsDefinition(StrictModel):
-    filesystem: Literal["all", "workspace", "read", "none"] = "all"
+    filesystem: Literal["all", "read", "none"] = "all"
     shell: Literal["all", "none"] = "all"
+
+    @field_validator("filesystem", mode="before")
+    @classmethod
+    def no_unenforced_workspace_mode(cls, value):
+        if value == "workspace":
+            raise ValueError("workspace confinement is not supported; choose all, read, or none. These select Pi tools, not an OS sandbox")
+        return value
 
 
 class McpServerDefinition(StrictModel):
@@ -126,16 +157,33 @@ class AgentConfig(StrictModel):
         invalid = [value for value in values if not SECRET_NAME_PATTERN.fullmatch(value)]
         if invalid:
             raise ValueError(f"invalid environment variable name: {invalid[0]}")
+        reserved = [value for value in values if value.startswith("PI_")]
+        if reserved:
+            raise ValueError(f"{reserved[0]} is reserved for Mantle's Pi isolation settings; use provider credential names instead")
         if len(values) != len(set(values)):
             raise ValueError("secret names must be unique")
         return values
 
     @model_validator(mode="after")
     def unique_resources(self) -> "AgentConfig":
+        if any("/" in resource.name for resource in self.resources.skills):
+            raise ValueError("skill names must be single directory names")
         for label, resources in (("skill", self.resources.skills), ("package", self.resources.packages)):
             names = [resource.name for resource in resources]
             if len(names) != len(set(names)):
                 raise ValueError(f"{label} names must be unique")
+        sources = []
+        for package in self.resources.packages:
+            source = package.source
+            if source.startswith("npm:"):
+                if "@" in source[5:]:
+                    source = source.rsplit("@", 1)[0]
+            else:
+                from mantle.sources import git_package_path
+                source = "git:" + str(git_package_path(source))
+            sources.append(source)
+        if len(sources) != len(set(sources)):
+            raise ValueError("package sources must be unique; multiple versions or aliases of the same package cannot coexist")
         if self.mcp.servers and any(package.name == "pi-mcp-adapter" for package in self.resources.packages):
             raise ValueError("pi-mcp-adapter is managed automatically when mcp.servers are declared")
         undeclared = sorted({
@@ -149,21 +197,21 @@ class AgentConfig(StrictModel):
 
 
 class RuntimeMetadata(StrictModel):
-    schema_version: int = 1
+    schema_version: Literal[1] = 1
     name: Literal["pi"] = "pi"
-    version: str
+    version: str = Field(pattern=RUNTIME_VERSION_PATTERN)
     package: str = "@earendil-works/pi-coding-agent"
 
 
 class MantleConfig(StrictModel):
-    schema_version: int = 1
+    schema_version: Literal[1] = 1
     cloud_url: str | None = None
     cloud_insecure: bool = False
-    default_runtime: str | None = None
+    default_runtime: str | None = Field(default=None, pattern=RUNTIME_VERSION_PATTERN)
 
 
 def default_agent_config(name: str, description: str = "", runtime_version: str = "latest") -> AgentConfig:
-    return AgentConfig(
-        agent=AgentDefinition(name=name, description=description),
-        runtime=RuntimeDefinition(version=runtime_version),
-    )
+    return AgentConfig.model_validate({
+        "agent": {"name": name, "description": description},
+        "runtime": {"version": runtime_version},
+    })

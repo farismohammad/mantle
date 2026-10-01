@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from mantle.errors import MantleError
+
 
 @dataclass(frozen=True)
 class MantlePaths:
@@ -32,7 +34,10 @@ class MantlePaths:
         return self.home / "runtimes" / "pi"
 
     def agent(self, name: str) -> Path:
-        return self.agents / name
+        root = self.agents / name
+        if root.is_symlink() or self.agents.is_symlink():
+            raise MantleError(f"Agent directories must not be symlinks: {root}")
+        return root
 
     def yaml(self, name: str) -> Path:
         return self.agent(name) / "agent.yaml"
