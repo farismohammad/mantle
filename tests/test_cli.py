@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from mantle.models import ResourceDefinition
+from rich.text import Text
 
 
 def test_skills_add_uses_named_skill_and_agent_options(cli, monkeypatch):
@@ -44,4 +45,4 @@ def test_skills_add_requires_agent_option(cli):
     )
 
     assert result.exit_code == 2
-    assert "--agent" in result.output
+    assert "--agent" in Text.from_ansi(result.output).plain
