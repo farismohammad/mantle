@@ -9,6 +9,9 @@ behaves. Mantle disables implicit discovery and explicitly loads the selected
 agent's resources plus the current project's `AGENTS.md` and `CLAUDE.md`.
 This is **configuration isolation, not an operating-system sandbox**.
 
+Mantle is early software preparing for v0.1.0. The repository is currently
+private and requires access; the public release and version tag are not yet published.
+
 ## Install
 
 Supported: Linux and macOS, Python 3.11+ (obtained by the installer if needed),
