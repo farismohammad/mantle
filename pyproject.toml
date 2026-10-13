@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mantle-agent-cli"
+version = "0.1.0"
+description = "Create and run isolated Pi agents"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Mantle contributors" }]
+requires-python = ">=3.11"
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+  "httpx>=0.28,<1",
+  "pydantic>=2.10,<3",
+  "pyyaml>=6.0,<7",
+  "rich>=13.9,<15",
+  "typer>=0.15,<1",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.3,<10", "pytest-cov>=6,<8"]
+
+[project.scripts]
+mantle = "mantle.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/farismohammad/mantle"
+Repository = "https://github.com/farismohammad/mantle"
+Issues = "https://github.com/farismohammad/mantle/issues"
+Changelog = "https://github.com/farismohammad/mantle/blob/main/CHANGELOG.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mantle"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]

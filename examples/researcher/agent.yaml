@@ -1,0 +1,22 @@
+mantle: "0.1"
+agent:
+  name: researcher
+  description: Answer questions with web search and cite the pages it used.
+runtime:
+  name: pi
+  version: "1.0.0"
+model:
+  provider: openai
+  name: gpt-5.6
+system_prompt: |
+  Search the web before answering. Cite the page behind each claim, say when
+  sources disagree, and say plainly when you could not find something.
+resources:
+  skills: []
+  packages:
+  - name: pi-web-access
+    source: npm:pi-web-access@0.38.0
+permissions:
+  filesystem: read
+  shell: none
+secrets: []

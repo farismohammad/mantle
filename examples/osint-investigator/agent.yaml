@@ -1,0 +1,25 @@
+mantle: "0.1"
+agent:
+  name: osint-investigator
+  description: Research a company from public sources and write a sourced brief.
+runtime:
+  name: pi
+  version: "1.0.0"
+model:
+  provider: openai
+  name: gpt-5.6
+system_prompt: |
+  Use only public sources and stay passive: never scan, log in to, or contact
+  the subject. Record the URL and date for every finding, keep facts separate
+  from your assessment, and never invent a source.
+resources:
+  skills:
+  - name: x-ray-a-company
+    source: https://github.com/useosint/skills/tree/06243a5620b0c9c97502edd4ee9e31995a3bdccd/skills/x-ray-a-company
+  packages:
+  - name: pi-web-access
+    source: npm:pi-web-access@0.38.0
+permissions:
+  filesystem: all
+  shell: none
+secrets: []

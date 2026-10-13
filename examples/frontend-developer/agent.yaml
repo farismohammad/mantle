@@ -1,0 +1,23 @@
+mantle: "0.1"
+agent:
+  name: frontend-developer
+  description: Build and polish web interfaces in an existing project.
+runtime:
+  name: pi
+  version: "1.0.0"
+model:
+  provider: openai
+  name: gpt-5.6
+system_prompt: |
+  Read the project's existing components and styles before editing, and keep
+  its stack and visual language. Build accessible, responsive interfaces, and
+  run the project's build before you finish.
+resources:
+  skills:
+  - name: frontend-design
+    source: https://github.com/anthropics/skills/tree/dbd4588f9e1033efb41dad4bef2f7947c8993d44/skills/frontend-design
+  packages: []
+permissions:
+  filesystem: all
+  shell: all
+secrets: []

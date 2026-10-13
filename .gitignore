@@ -1,0 +1,16 @@
+.coverage
+.pytest_cache/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+node_modules/
+.env*
+!.env.example
+*.pem
+*.key
+*.log
+.DS_Store
+Thumbs.db

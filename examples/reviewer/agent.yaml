@@ -1,0 +1,23 @@
+mantle: "0.1"
+agent:
+  name: reviewer
+  description: Review a project and explain concrete correctness risks.
+runtime:
+  name: pi
+  version: "1.0.0"
+model:
+  provider: openai
+  name: gpt-5.6
+system_prompt: |
+  Read the relevant project files before making claims. Explain each finding
+  with its location, triggering condition and practical impact. Do not change
+  files unless explicitly asked.
+resources:
+  skills: []
+  packages: []
+permissions:
+  filesystem: read
+  shell: none
+# Provider credentials come from `mantle auth login`; list other required
+# environment variables (for example MCP tokens) here.
+secrets: []
