@@ -38,6 +38,13 @@ identifiers. Duplicate mapping keys, merge keys, non-string keys, unsupported
 tags/types and recursive/excessive aliases are rejected. Limits: 1 MB per file,
 64 nesting levels, 100 aliases, and 10,000 expanded values.
 
+MCP `idle_timeout` and `request_timeout_ms` must be integers from `0` through
+`9007199254740991` (or null), so the CLI and browser preserve the same exact value.
+Decimal, signed hexadecimal (`+0xA`) and octal (`0o7`) integers are supported.
+Explicit `!!int` values may also contain digit separators, such as `!!int 1_000`.
+Floating-point spellings such as `1.0` and `1e3` are not integers; write `1` and
+`1000` instead. Formatting preserves integer digits without rounding.
+
 ## Repeatable resources
 
 Pin references when publishing a configuration intended to reconstruct the same

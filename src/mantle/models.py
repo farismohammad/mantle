@@ -11,6 +11,7 @@ SECRET_NAME_PATTERN = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 MCP_SERVER_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"
 RUNTIME_VERSION_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$"
 RESOURCE_NAME_PATTERN = r"^(?:@[A-Za-z0-9_-]+/)?[A-Za-z0-9_][A-Za-z0-9_.-]*$"
+MAX_SAFE_INTEGER = 9_007_199_254_740_991
 SecretName = Annotated[str, StringConstraints(pattern=SECRET_NAME_PATTERN.pattern)]
 McpServerName = Annotated[str, StringConstraints(pattern=MCP_SERVER_NAME_PATTERN)]
 
@@ -96,8 +97,8 @@ class McpServerDefinition(StrictModel):
     auth: Literal["bearer", "oauth"] | None = None
     bearer_token_env: SecretName | None = None
     lifecycle: Literal["lazy", "eager", "keep-alive", "lazy-keep-alive"] = "lazy"
-    idle_timeout: int | None = Field(default=None, ge=0)
-    request_timeout_ms: int | None = Field(default=None, ge=0)
+    idle_timeout: int | None = Field(default=None, ge=0, le=MAX_SAFE_INTEGER)
+    request_timeout_ms: int | None = Field(default=None, ge=0, le=MAX_SAFE_INTEGER)
     protocol_version: Literal["legacy", "auto", "2026-07-28"] = "legacy"
     expose_resources: bool = True
     direct_tools: bool | list[str] = False

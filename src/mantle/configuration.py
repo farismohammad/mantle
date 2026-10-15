@@ -59,9 +59,20 @@ UniqueKeyLoader.add_implicit_resolver("tag:yaml.org,2002:float", re.compile(r"^(
 
 
 def _core_integer(loader, node):
-    value = loader.construct_scalar(node)
+    value = loader.construct_scalar(node).strip()
+    # Explicit !!int scalars may use separators, but must still be integers.
+    # Validate before int() so malformed tags produce normal YAML diagnostics.
+    if not re.fullmatch(r"[-+]?(?:[0-9](?:_?[0-9])*|0o_?[0-7](?:_?[0-7])*|0x_?[0-9a-fA-F](?:_?[0-9a-fA-F])*)", value):
+        raise yaml.constructor.ConstructorError(
+            None, None, "must be a YAML integer", node.start_mark,
+        )
     signless = value.lstrip("+-")
-    return int(value, 0 if signless.startswith(("0o", "0x")) else 10)
+    try:
+        return int(value, 0 if signless.startswith(("0o", "0x")) else 10)
+    except ValueError as error:
+        raise yaml.constructor.ConstructorError(
+            None, None, "YAML integer is too large", node.start_mark,
+        ) from error
 
 
 UniqueKeyLoader.add_constructor("tag:yaml.org,2002:int", _core_integer)

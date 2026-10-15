@@ -64,3 +64,40 @@ def test_malformed_configuration_has_clean_cli_errors(cli, tmp_path, text, expec
 def test_valid_package_sources_remain_supported(source):
     config = parse_agent_yaml(f"agent: {{name: demo}}\nresources: {{packages: [{{name: example, source: '{source}'}}]}}")
     assert config.resources.packages[0].source == source
+
+
+@pytest.mark.parametrize("key", ["idle_timeout", "request_timeout_ms"])
+@pytest.mark.parametrize("value, expected", [
+    ("0", 0), ("+1", 1), ("01", 1), ("0xA", 10), ("0o7", 7),
+    ("+0xA", 10), ("+0o7", 7), ("-0x0", 0), ("-0o0", 0),
+    ("!!int 1_0", 10), ("!!int 0x_a", 10), ("!!int 0o_7", 7),
+    ('!!int " 1 "', 1), ("!!int +01", 1),
+    ("9007199254740991", 9_007_199_254_740_991),
+    ("0x1fffffffffffff", 9_007_199_254_740_991),
+    ("!!int 9_007_199_254_740_991", 9_007_199_254_740_991),
+])
+def test_timeout_integer_syntax_and_exact_values_match_cloud(key, value, expected):
+    config = parse_agent_yaml(f"agent: {{name: demo}}\nmcp:\n  servers:\n    docs:\n      command: node\n      {key}: {value}\n")
+    assert getattr(config.mcp.servers["docs"], key) == expected
+
+
+@pytest.mark.parametrize("key", ["idle_timeout", "request_timeout_ms"])
+@pytest.mark.parametrize("value", [
+    "9007199254740992", "9007199254740993", "0x20000000000001",
+    "!!int 9_007_199_254_740_993", "9" * 400,
+    "!!int nope", "!!int 1.0", "!!int 1__0", "!!int 1_", "!!int 0x_",
+    "1.0", "1e3", ".inf", "1e400", "1_0", "-1",
+])
+def test_invalid_or_inexact_timeout_has_a_normal_validation_error(key, value):
+    with pytest.raises(MantleError):
+        parse_agent_yaml(f"agent: {{name: demo}}\nmcp:\n  servers:\n    docs:\n      command: node\n      {key}: {value}\n")
+
+
+@pytest.mark.parametrize("value, message", [("!!int nope", "must be a YAML integer"), ("9" * 5000, "integer")])
+def test_malformed_explicit_integer_has_no_cli_traceback(cli, tmp_path, value, message):
+    source = tmp_path / "agent.yaml"
+    source.write_text(f"agent: {{name: demo}}\nmcp:\n  servers:\n    docs:\n      command: node\n      idle_timeout: {value}\n")
+    result = cli("validate", str(source))
+    assert result.exit_code == 1
+    assert message in result.stderr
+    assert "Traceback" not in result.stderr

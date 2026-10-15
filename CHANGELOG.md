@@ -13,3 +13,6 @@ released independently.
   Cloud registry.
 - Add staged resource reconstruction and actionable validation and process
   errors.
+- Align YAML integer validation with Cloud, reject timeout values beyond the
+  exact shared integer range, and report malformed integer tags as configuration
+  errors.

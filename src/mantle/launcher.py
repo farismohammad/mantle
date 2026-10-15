@@ -12,7 +12,7 @@ from mantle.agents import AgentStore, normalize_models_config
 from mantle.errors import MantleError
 from mantle.environment import pi_launch_environment
 from mantle.logging import append_event
-from mantle.mcp import MCP_ADAPTER, remove_mcp_bridge, write_mcp_bridge
+from mantle.mcp import MCP_ADAPTER, MCP_CONFIG_FILENAME, MCP_EXTENSION_FILENAME, remove_mcp_bridge, write_mcp_bridge
 from mantle.models import ResourceDefinition
 from mantle.packages import PackageManager, git_package_path, package_name_from_source
 from mantle.paths import MantlePaths
@@ -47,7 +47,10 @@ class AgentLauncher:
         pi_arguments: list[str] | None = None,
     ) -> LaunchSpec:
         agent_root = self.paths.agent(agent_name)
-        for filename in ("agent.yaml", "settings.json", "auth.json", "models.json"):
+        for filename in (
+            "agent.yaml", "settings.json", "auth.json", "models.json",
+            "extensions", MCP_CONFIG_FILENAME, f"extensions/{MCP_EXTENSION_FILENAME}",
+        ):
             self._within(agent_root / filename, agent_root)
         config = AgentStore(self.paths).get(agent_name)
         root = resolve_project_root(current, project_root)
