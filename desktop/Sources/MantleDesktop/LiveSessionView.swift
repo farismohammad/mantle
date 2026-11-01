@@ -36,6 +36,7 @@ struct SessionDialog: Identifiable {
     @Published var dialogs: [SessionDialog] = []
     @Published var pendingMessages = 0
     @Published var usage = ""
+    @Published var needsCredentials = false
     private var process: Process?
     private var input: FileHandle?
     private var output: FileHandle?
@@ -45,7 +46,8 @@ struct SessionDialog: Identifiable {
     private var activeAssistant: String?
     private var textBlocks: [Int: String] = [:]
     private var started = false
-    private var closing = false
+    private(set) var closing = false
+    private var stopRequested = false
     private var pendingPrompts: [String: String] = [:]
     private let writer = DispatchQueue(label: "cloud.mantle.desktop.rpc-writer")
 
@@ -63,7 +65,9 @@ struct SessionDialog: Identifiable {
             if !sessionID.isEmpty { arguments += ["--session", sessionID] }
             arguments += ["--", "--mode", "rpc"]
             let child = Process(); child.executableURL = Engine.python
-            child.arguments = arguments; child.environment = Engine.environment
+            // Unlike bridge requests, startup progress is shown here: Pi may be downloading.
+            var environment = Engine.environment; environment["MANTLE_QUIET"] = nil
+            child.arguments = arguments; child.environment = environment
             child.currentDirectoryURL = URL(fileURLWithPath: directory, isDirectory: true)
             let stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
             child.standardInput = stdin; child.standardOutput = stdout; child.standardError = stderr
@@ -119,7 +123,7 @@ struct SessionDialog: Identifiable {
     func submit() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard ready, !text.isEmpty, !ended else { return }
-        error = nil; draft = ""
+        error = nil; draft = ""; needsCredentials = false; stopRequested = false
         var fields: [String: JSON] = ["message": .string(text)]
         if running { fields["streamingBehavior"] = .string("steer"); status = "Instruction queued…" }
         else { running = true; status = "Working…" }
@@ -130,7 +134,7 @@ struct SessionDialog: Identifiable {
 
     func stop() {
         guard ready, running else { return }
-        status = "Stopping…"
+        status = "Stopping…"; stopRequested = true
         for dialog in dialogs { answer(dialog, cancelled: true) }
         send("clear_queue")
         send("abort")
@@ -138,6 +142,7 @@ struct SessionDialog: Identifiable {
 
     func close() {
         guard !closing else { return }
+        stopRequested = true
         for dialog in dialogs { answer(dialog, cancelled: true) }
         if running { send("clear_queue"); send("abort") }
         closing = true
@@ -178,8 +183,9 @@ struct SessionDialog: Identifiable {
         switch record["type"].string {
         case "response": handleResponse(record)
         case "agent_start", "turn_start": running = true; status = "Working…"
-        case "agent_end": send("get_state")
-        case "agent_settled": running = false; status = record["aborted"].bool ? "Stopped" : "Ready"; send("get_state"); send("get_session_stats")
+        // Older Pi versions never send agent_settled, so token totals are also requested here.
+        case "agent_end": send("get_state"); send("get_session_stats")
+        case "agent_settled": running = false; status = record["aborted"].bool || stopRequested ? "Stopped" : "Ready"; send("get_state"); send("get_session_stats")
         case "message_start":
             let message = record["message"]
             if message["role"].string == "assistant" {
@@ -203,7 +209,8 @@ struct SessionDialog: Identifiable {
                 let text = Self.messageText(message)
                 updateAssistant(text: text)
                 if let id = activeAssistant, let index = transcript.firstIndex(where: { $0.id == id }) { transcript[index].running = false }
-                if !message["errorMessage"].string.isEmpty { error = message["errorMessage"].string }
+                // Stopping a run is the user's choice, so its abort isn't reported as a failure.
+                if !message["errorMessage"].string.isEmpty && message["stopReason"].string != "aborted" && !stopRequested { report(message["errorMessage"].string) }
                 activeAssistant = nil
             }
         case "tool_execution_start":
@@ -242,7 +249,12 @@ struct SessionDialog: Identifiable {
     private func handleResponse(_ record: JSON) {
         let command = record["command"].string
         if !record["success"].bool {
-            error = record["error"].string
+            if command == "clear_queue" {
+                // Older Pi versions have no clear_queue, so a queued instruction may still run.
+                if pendingMessages > 0 { error = "This Pi version can’t cancel queued instructions, so yours may still run. Update the agent’s runtime to avoid this." }
+                return
+            }
+            report(record["error"].string)
             if command == "prompt" {
                 running = false; status = "Ready"
                 if let text = pendingPrompts.removeValue(forKey: record["id"].string) { draft = draft.isEmpty ? text : draft + "\n\n" + text }
@@ -254,7 +266,7 @@ struct SessionDialog: Identifiable {
         case "get_state":
             sessionFile = data["sessionFile"].string; sessionTitle = data["sessionName"].string
             running = data["isStreaming"].bool || data["isCompacting"].bool || data["pendingMessageCount"].int > 0
-            if !running { status = "Ready" }
+            if !running { status = stopRequested ? "Stopped" : "Ready" }
             if record["id"].string == "initial-state" { status = "Opening the conversation…"; send("get_messages", id: "initial-messages") }
             else { ready = true }
         case "get_messages":
@@ -277,6 +289,13 @@ struct SessionDialog: Identifiable {
         }
     }
 
+    // Pi's missing-key text points at its terminal /login command, which this window doesn't have.
+    private func report(_ message: String) {
+        if let first = message.split(separator: "\n").first, first.hasPrefix("No API key found") {
+            error = first + " Connect the provider in Connections, then send your message again."; needsCredentials = true
+        } else { error = message }
+    }
+
     private func updateAssistant(text: String) {
         if let id = activeAssistant, let index = transcript.firstIndex(where: { $0.id == id }) { transcript[index].text = text }
     }
@@ -294,13 +313,39 @@ struct SessionDialog: Identifiable {
 
 private extension String { func prefixString(_ limit: Int) -> String { String(prefix(limit)) } }
 
+// SwiftUI has no close hook before macOS 15, so this sits in front of its window delegate.
+private struct WindowCloseGuard: NSViewRepresentable {
+    let shouldClose: () -> Bool
+    final class Proxy: NSObject, NSWindowDelegate {
+        var shouldClose: () -> Bool = { true }
+        private weak var window: NSWindow?
+        private var original: NSWindowDelegate?
+        func attach(to window: NSWindow?) {
+            guard let window, window.delegate !== self else { return }
+            original = window.delegate; self.window = window; window.delegate = self
+        }
+        func detach() { if window?.delegate === self { window?.delegate = original } }
+        func windowShouldClose(_ sender: NSWindow) -> Bool { shouldClose() && (original?.windowShouldClose?(sender) ?? true) }
+        override func responds(to selector: Selector!) -> Bool { super.responds(to: selector) || original?.responds(to: selector) == true }
+        override func forwardingTarget(for selector: Selector!) -> Any? { original?.responds(to: selector) == true ? original : super.forwardingTarget(for: selector) }
+    }
+    func makeCoordinator() -> Proxy { Proxy() }
+    func makeNSView(context: Context) -> NSView { NSView() }
+    func updateNSView(_ view: NSView, context: Context) {
+        context.coordinator.shouldClose = shouldClose
+        DispatchQueue.main.async { [weak view] in context.coordinator.attach(to: view?.window) }
+    }
+    static func dismantleNSView(_ view: NSView, coordinator: Proxy) { coordinator.detach() }
+}
+
 struct LiveSessionView: View {
     let agent: MantleAgent
     let directory: String
-    let prompt: String
+    let launchID: String
     let includeContext: Bool
     let projectRoot: String
     let sessionID: String
+    @EnvironmentObject private var app: AppModel
     @Environment(\.dismiss) private var dismiss
     @StateObject private var session = NativeSession()
     @SessionViewState private var confirmClose = false
@@ -328,18 +373,21 @@ struct LiveSessionView: View {
             Divider()
             conversation
             if let error = session.error, !error.isEmpty {
-                HStack(alignment: .top) { Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.orange); Text(error).font(.caption).textSelection(.enabled).lineLimit(5); Spacer(); Button { session.error = nil } label: { Image(systemName: "xmark") }.buttonStyle(.plain).help("Dismiss error") }.padding(14).background(Color.orange.opacity(0.08))
+                HStack(alignment: .top) { Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.orange); Text(error).font(.caption).textSelection(.enabled).lineLimit(5); Spacer(); if session.needsCredentials { Button("Open Connections") { app.connectionsTab = "Providers"; app.destination = .connections; app.showMainWindow() }.controlSize(.small) }; Button { session.error = nil } label: { Image(systemName: "xmark") }.buttonStyle(.plain).help("Dismiss error") }.padding(14).background(Color.orange.opacity(0.08))
             }
             composer
         }
         .frame(minWidth: 760, idealWidth: 960, minHeight: 580, idealHeight: 720)
         .background(Color(nsColor: .windowBackgroundColor))
-        .task { session.start(agent: agent, directory: directory, prompt: prompt, includeContext: includeContext, projectRoot: projectRoot, sessionID: sessionID); composerFocused = true }
+        .task { session.start(agent: agent, directory: directory, prompt: app.takeFirstMessage(launchID), includeContext: includeContext, projectRoot: projectRoot, sessionID: sessionID) }
+        // The composer can't take focus while it's disabled, so this waits for the session to be ready.
+        .onChange(of: session.ready) { _, ready in if ready { Task { await Task.yield(); composerFocused = true } } }
         .onDisappear { session.close() }
-        .interactiveDismissDisabled(session.running)
+        .background(WindowCloseGuard { if session.running && !session.closing { confirmClose = true; return false }; return true })
         .alert("Close this session?", isPresented: $confirmClose) {
             Button("Keep Working", role: .cancel) {}
-            Button("Stop and Close") { session.close(); dismiss() }
+            // A window can't close while this alert is attached, so wait for it to go away.
+            Button("Stop and Close") { session.close(); Task { try? await Task.sleep(nanoseconds: 350_000_000); dismiss() } }
         } message: { Text("The current run will stop. Your conversation remains saved and can be resumed from Sessions.") }
         .sheet(item: Binding(get: { session.dialogs.first }, set: { newValue in if newValue == nil, let current = session.dialogs.first { session.answer(current, cancelled: true) } })) { dialog in
             NativeSessionDialog(dialog: dialog) { value, confirmed, cancelled in session.answer(dialog, value: value, confirmed: confirmed, cancelled: cancelled) }
@@ -373,9 +421,12 @@ struct LiveSessionView: View {
         VStack(spacing: 10) {
             Divider()
             HStack(alignment: .bottom, spacing: 12) {
-                TextField(session.running ? "Add an instruction…" : "Message \(agent.title)…", text: $session.draft, axis: .vertical)
-                    .textFieldStyle(.plain).lineLimit(2...6).font(.system(size: 14)).focused($composerFocused)
-                    .onSubmit { session.submit() }.disabled(!session.ready || session.ended)
+                // Return adds a line and ⌘Return sends, as the footer says.
+                ZStack(alignment: .topLeading) {
+                    if session.draft.isEmpty { Text(session.running ? "Add an instruction…" : "Message \(agent.title)…").font(.system(size: 14)).foregroundStyle(.secondary).padding(.leading, 5).allowsHitTesting(false) }
+                    TextEditor(text: $session.draft).font(.system(size: 14)).scrollContentBackground(.hidden).frame(height: min(6, max(2, CGFloat(session.draft.filter(\.isNewline).count + 1))) * 20)
+                        .focused($composerFocused).disabled(!session.ready || session.ended).accessibilityLabel("Message")
+                }
                 if session.running { Button { session.stop() } label: { Image(systemName: "stop.fill").frame(width: 20, height: 20) }.buttonStyle(.bordered).help("Stop the current run") }
                 Button { session.submit() } label: { Image(systemName: "arrow.up").font(.system(size: 15, weight: .semibold)).frame(width: 22, height: 22) }.buttonStyle(.borderedProminent).help(session.running ? "Queue an instruction" : "Send message").disabled(!session.ready || session.ended || session.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).keyboardShortcut(.return, modifiers: .command)
             }.padding(16).background(.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 16)).overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(.primary.opacity(0.08)))

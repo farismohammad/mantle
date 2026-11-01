@@ -40,6 +40,7 @@ from pydantic import ValidationError
 
 MAX_REQUEST_BYTES = 1_500_000
 MAX_SESSION_BYTES = 12_000_000
+RETAINED_FOLDER = re.compile(r"[a-z0-9_][a-z0-9_-]*(\.[0-9TZ]+)?")
 
 
 def required_text(request: dict[str, Any], key: str) -> str:
@@ -119,6 +120,50 @@ def backup_file(paths: MantlePaths, source: Path, group: str) -> str | None:
         target.flush()
         os.fsync(target.fileno())
     return str(destination)
+
+
+def backup_files(paths: MantlePaths, group: str) -> list[Path]:
+    """A group's backups, oldest first; their names start with a UTC timestamp."""
+    base = paths.home / "backups" / group
+    reject_symlinks(base)
+    if not base.is_dir():
+        return []
+    return sorted(item for item in base.iterdir() if item.is_file() and not item.is_symlink())
+
+
+def prune_backups(paths: MantlePaths, group: str) -> None:
+    """Credential backups exist to undo the latest change, not to keep old values forever."""
+    for item in backup_files(paths, group)[:-1]:
+        item.unlink()
+
+
+def scrub_credential_backups(paths: MantlePaths, provider: str) -> None:
+    """Signing out must not leave that provider's credential in a backup."""
+    for item in backup_files(paths, "credentials"):
+        try:
+            entries = json.loads(item.read_text(encoding="utf-8"))
+        except (ValueError, UnicodeError):
+            item.unlink()  # Unreadable, so it can't be shown to be free of the credential.
+            continue
+        if not isinstance(entries, dict):
+            item.unlink()
+        elif provider in entries:
+            del entries[provider]
+            if entries:
+                atomic_write_text(item, json.dumps(entries, indent=2) + "\n", mode=0o600)
+            else:
+                item.unlink()
+
+
+def scrub_secret_backups(paths: MantlePaths, name: str) -> None:
+    """Removing a secret must not leave its value in a backup."""
+    for item in backup_files(paths, "secrets"):
+        try:
+            remove_dotenv_value(item, name)
+            if not parse_dotenv(item):
+                item.unlink()
+        except (MantleError, UnicodeError):
+            item.unlink()  # Unreadable, so it can't be shown to be free of the value.
 
 
 def digest(text: str) -> str:
@@ -230,7 +275,27 @@ def snapshot(paths: MantlePaths) -> dict[str, Any]:
 
 
 def session_files(paths: MantlePaths, agent: str) -> list[Path]:
-    base = agent_root(paths, agent) / "sessions"
+    return session_files_in(agent_root(paths, agent) / "sessions")
+
+
+def retained_root(paths: MantlePaths, folder: str) -> Path:
+    if not RETAINED_FOLDER.fullmatch(folder):
+        raise MantleError("The selected retained session folder is not valid.")
+    root = paths.home / "retained-sessions" / folder
+    reject_symlinks(root)
+    return root
+
+
+def archive_retained_sessions(paths: MantlePaths, name: str) -> None:
+    """Move earlier retained sessions aside so an agent that reused this name can still be deleted."""
+    kept = paths.home / "retained-sessions" / name
+    reject_symlinks(kept)
+    if kept.exists():
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        kept.rename(kept.with_name(f"{name}.{stamp}"))
+
+
+def session_files_in(base: Path) -> list[Path]:
     reject_symlinks(base)
     if not base.is_dir():
         return []
@@ -259,52 +324,67 @@ def session_message(entry: dict[str, Any]) -> dict[str, Any] | None:
 def list_sessions(paths: MantlePaths, request: dict[str, Any], *, include_titles: bool = True) -> list[dict[str, Any]]:
     selected = request.get("agent")
     names = [selected] if isinstance(selected, str) and selected else [a.agent.name for a in AgentStore(paths).list()]
-    result = []
-    for name in names:
-        for file in session_files(paths, name):
-            info = {"id": file.stem, "agent": name, "path": str(file), "title": "Untitled session",
-                    "updatedAt": datetime.fromtimestamp(file.stat().st_mtime, timezone.utc).isoformat(), "cwd": ""}
-            if include_titles:
-                try:
-                    with file.open(encoding="utf-8") as stream:
-                        for index, line in enumerate(stream):
-                            if index >= 100 or len(line) > 1_000_000:
-                                break
-                            try:
-                                entry = json.loads(line)
-                            except ValueError:
-                                continue
-                            if not isinstance(entry, dict):
-                                continue
-                            if entry.get("type") == "session":
-                                info["id"] = str(entry.get("id", file.stem))
-                                info["cwd"] = str(entry.get("cwd", ""))
-                            if entry.get("type") == "session_info" and isinstance(entry.get("name"), str):
-                                info["title"] = entry["name"]
-                            message = session_message(entry)
-                            if message and message["role"] == "user" and info["title"] == "Untitled session":
-                                info["title"] = message["text"].strip().replace("\n", " ")[:100]
-                    # Pi appends session renames, often long after the first prompt.
-                    with file.open("rb") as stream:
-                        stream.seek(max(0, file.stat().st_size - 65536))
-                        tail = stream.read().decode("utf-8", errors="replace")
-                    for line in reversed(tail.split("\n")):
-                        try:
-                            entry = json.loads(line)
-                        except ValueError:
-                            continue
-                        if isinstance(entry, dict) and entry.get("type") == "session_info" and isinstance(entry.get("name"), str):
-                            info["title"] = entry["name"] or info["title"]
-                            break
-                except (OSError, UnicodeError):
-                    info["title"] = "Unreadable session"
-            result.append(info)
+    result = [session_info(file, name, include_titles) for name in names for file in session_files(paths, name)]
+    if not selected:
+        # Sessions of deleted agents stay readable, but with no agent they can't be resumed.
+        base = paths.home / "retained-sessions"
+        reject_symlinks(base)
+        for root in sorted(base.iterdir()) if base.is_dir() else []:
+            if root.is_dir() and not root.is_symlink() and RETAINED_FOLDER.fullmatch(root.name):
+                for file in session_files_in(root):
+                    result.append({**session_info(file, root.name.split(".")[0], include_titles),
+                                   "retained": True, "retainedFolder": root.name})
     return sorted(result, key=lambda item: item["updatedAt"], reverse=True)
 
 
+def session_info(file: Path, name: str, include_titles: bool) -> dict[str, Any]:
+    info = {"id": file.stem, "agent": name, "path": str(file), "title": "Untitled session",
+            "updatedAt": datetime.fromtimestamp(file.stat().st_mtime, timezone.utc).isoformat(), "cwd": ""}
+    if include_titles:
+        try:
+            with file.open(encoding="utf-8") as stream:
+                for index, line in enumerate(stream):
+                    if index >= 100 or len(line) > 1_000_000:
+                        break
+                    try:
+                        entry = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(entry, dict):
+                        continue
+                    if entry.get("type") == "session":
+                        info["id"] = str(entry.get("id", file.stem))
+                        info["cwd"] = str(entry.get("cwd", ""))
+                    if entry.get("type") == "session_info" and isinstance(entry.get("name"), str):
+                        info["title"] = entry["name"]
+                    message = session_message(entry)
+                    if message and message["role"] == "user" and info["title"] == "Untitled session":
+                        info["title"] = message["text"].strip().replace("\n", " ")[:100]
+            # Pi appends session renames, often long after the first prompt.
+            with file.open("rb") as stream:
+                stream.seek(max(0, file.stat().st_size - 65536))
+                tail = stream.read().decode("utf-8", errors="replace")
+            for line in reversed(tail.split("\n")):
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(entry, dict) and entry.get("type") == "session_info" and isinstance(entry.get("name"), str):
+                    info["title"] = entry["name"] or info["title"]
+                    break
+        except (OSError, UnicodeError):
+            info["title"] = "Unreadable session"
+    return info
+
+
 def read_session(paths: MantlePaths, request: dict[str, Any]) -> dict[str, Any]:
-    name = required_text(request, "agent")
-    base = agent_root(paths, name) / "sessions"
+    folder = request.get("retainedFolder")
+    if folder is not None:
+        if not isinstance(folder, str):
+            raise MantleError("The selected retained session folder is not valid.")
+        base = retained_root(paths, folder)
+    else:
+        base = agent_root(paths, required_text(request, "agent")) / "sessions"
     file = Path(required_text(request, "path")).expanduser()
     if not file.is_absolute():
         file = base / file
@@ -532,7 +612,10 @@ def dispatch(request: dict[str, Any], paths: MantlePaths | None = None) -> Any:
         name = required_text(request, "name")
         root = agent_root(paths, name)
         backup_file(paths, root / "agent.yaml", name)
-        kept = store.delete(name, keep_sessions=request.get("keepSessions", True) is True)
+        keep = request.get("keepSessions", True) is True
+        if keep and (root / "sessions").exists():
+            archive_retained_sessions(paths, name)
+        kept = store.delete(name, keep_sessions=keep)
         return {"deleted": name, "retainedSessions": str(kept) if kept else None}
     if operation.startswith("skills.") or operation.startswith("packages."):
         name = required_text(request, "agent")
@@ -588,11 +671,15 @@ def dispatch(request: dict[str, Any], paths: MantlePaths | None = None) -> Any:
             provider = required_text(request, "provider")
             if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}", provider):
                 raise MantleError("Enter a valid provider ID.")
-            backup_file(paths, credentials.path, "credentials")
             if operation == "auth.saveKey":
-                credentials.set_api_key(provider, required_text(request, "key"))
+                key = required_text(request, "key")
+                backup_file(paths, credentials.path, "credentials")
+                credentials.set_api_key(provider, key)
+                prune_backups(paths, "credentials")
                 return {"provider": provider, "saved": True}
-            return {"provider": provider, "removed": credentials.remove(provider)}
+            removed = credentials.remove(provider)
+            scrub_credential_backups(paths, provider)
+            return {"provider": provider, "removed": removed}
         name = required_text(request, "agent")
         root = agent_root(paths, name)
         store.require_local(name)
@@ -612,11 +699,15 @@ def dispatch(request: dict[str, Any], paths: MantlePaths | None = None) -> Any:
         confirmation(request)
         reject_symlinks(paths.dotenv)
         name = required_text(request, "name")
-        backup_file(paths, paths.dotenv, "secrets")
         if operation == "secrets.set":
-            set_dotenv_value(paths.dotenv, name, required_text(request, "value"))
+            value = required_text(request, "value")
+            backup_file(paths, paths.dotenv, "secrets")
+            set_dotenv_value(paths.dotenv, name, value)
+            prune_backups(paths, "secrets")
             return {"name": name, "saved": True}
-        return {"name": name, "removed": remove_dotenv_value(paths.dotenv, name)}
+        removed = remove_dotenv_value(paths.dotenv, name)
+        scrub_secret_backups(paths, name)
+        return {"name": name, "removed": removed}
     raise MantleError(f"Unknown action: {operation}")
 
 

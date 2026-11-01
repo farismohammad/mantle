@@ -178,6 +178,8 @@ def main() -> None:
             key=lambda item: item["name"].lower(),
         ),
         "sourceCommit": subprocess.run(["git", "-C", str(REPOSITORY), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip(),
+        # True means the app includes changes that sourceCommit doesn't record.
+        "sourceModified": bool(subprocess.run(["git", "-C", str(REPOSITORY), "status", "--porcelain"], capture_output=True, text=True).stdout.strip()),
     }
     (resources / "build-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     # Each copied native component receives a fresh local signature. The source

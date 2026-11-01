@@ -72,8 +72,10 @@ struct RegistryView: View {
         }
         .task { address = app.cloudURL; allowUntrustedCertificate = app.snapshot["settings"]["cloud_insecure"].bool; if !address.isEmpty { await reload() } }
         .onChange(of: address) { _, value in
-            if !app.registryToken.isEmpty && AppModel.registryOrigin(value) != AppModel.registryOrigin(app.registryTokenURL) {
+            // A token is bound to an address only once connected, so it can be entered before the address.
+            if !app.registryToken.isEmpty, let bound = AppModel.registryOrigin(app.registryTokenURL), AppModel.registryOrigin(value) != bound {
                 app.registryToken = ""; app.registryTokenURL = ""
+                connectionError = "The bearer token was cleared because the registry address changed. Enter it again for this address."
             }
         }
         .alert(item: $pending) { item in
@@ -115,8 +117,8 @@ struct RegistryView: View {
             }
             DisclosureGroup("Connection options", isExpanded: $showToken) {
                 VStack(alignment: .leading, spacing: 8) {
-                    SecureField("Bearer token", text: Binding(get: { app.registryToken }, set: { app.registryToken = $0; app.registryTokenURL = address })).textFieldStyle(.roundedBorder)
-                    Text("For registries behind an authenticating gateway. Kept only for this app session; use HTTPS when sending a token.").font(.caption).foregroundStyle(.secondary)
+                    SecureField("Bearer token", text: Binding(get: { app.registryToken }, set: { app.registryToken = $0; app.registryTokenURL = connected ? address : "" })).textFieldStyle(.roundedBorder)
+                    Text("For registries behind an authenticating gateway. Sent to the address you connect to, and cleared if that address changes. Kept only for this app session; use HTTPS when sending a token.").font(.caption).foregroundStyle(.secondary)
                     Toggle("Allow an untrusted TLS certificate", isOn: $allowUntrustedCertificate).toggleStyle(.checkbox)
                     if allowUntrustedCertificate { Text("Certificate verification will be disabled for this registry.").font(.caption).foregroundStyle(.orange) }
                 }.padding(.top, 8)
@@ -253,6 +255,7 @@ struct RegistryView: View {
     }
 
     private func connect() {
+        if !app.registryToken.isEmpty && AppModel.registryOrigin(app.registryTokenURL) == nil { app.registryTokenURL = address }
         let parameters: [String: JSON] = ["url": .string(address.trimmingCharacters(in: .whitespacesAndNewlines)), "insecure": .bool(allowUntrustedCertificate), "confirmed": .bool(true)]
         if allowUntrustedCertificate {
             pending = PendingAction(title: "Connect without verifying the certificate?", message: "Only continue for a registry you control. Mantle cannot verify the server’s identity at " + address, button: "Connect", operation: "cloud.connect", parameters: parameters, success: "Registry connected.")

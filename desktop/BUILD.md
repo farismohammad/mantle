@@ -57,7 +57,7 @@ The minimum operating-system declaration is a build target, not a claim of testi
 
 ## Source and credits
 
-The desktop port starts from the published [Mantle CLI](https://github.com/farismohammad/mantle) `main` snapshot `50ae59ccfd69af8fd58cd15b4eb49fc7d4d512f6`. The original engine remains in `src/mantle`; this port's additions are under `desktop/`. The build manifest records the current checkout commit for each app. Unpublished changes in another checkout are not included in this source snapshot.
+The desktop port starts from the published [Mantle CLI](https://github.com/farismohammad/mantle) `main` snapshot `50ae59ccfd69af8fd58cd15b4eb49fc7d4d512f6`. The original engine remains in `src/mantle`; this port's additions are under `desktop/`. The build manifest records the current checkout commit for each app, and `sourceModified` is true when the build includes uncommitted changes. Unpublished changes in another checkout are not included in this source snapshot.
 
 The brand palette and cloak/M mark come from [Mantle Web](https://github.com/farismohammad/mantle-web), snapshot `60a1fe1beaa551a2d609de132567cd1085dbbac7`. The icon adapts that existing vector to a macOS enclosure; the app does not imply Apple authorship or endorsement. SwiftUI, AppKit, system fonts, and SF Symbols are supplied by macOS.
 

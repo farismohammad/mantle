@@ -139,6 +139,12 @@ enum Destination: String, CaseIterable, Identifiable {
     @Published var connectionsTab = "Providers"
     @Published var registryToken = ""
     @Published var registryTokenURL = ""
+    // A window whose launch isn't listed was restored by macOS and must not start an agent.
+    @Published private(set) var openedLaunches: Set<String> = []
+    private var firstMessages: [String: String] = [:]
+    func prepareSession(_ launch: SessionLaunch, firstMessage: String = "") { openedLaunches.insert(launch.launchID); firstMessages[launch.launchID] = firstMessage }
+    func takeFirstMessage(_ launchID: String) -> String { firstMessages.removeValue(forKey: launchID) ?? "" }
+    func showMainWindow() { NSApp.windows.first { $0.isVisible && $0.canBecomeMain && $0.title != "Mantle Session" }?.makeKeyAndOrderFront(nil) }
     var selectedAgent: MantleAgent? { agents.first { $0.id == selection } }
     var cloudURL: String { snapshot["settings"]["cloud_url"].string }
     var credentials: [JSON] { snapshot["credentials"].array }
@@ -229,17 +235,18 @@ struct StatusPill: View {
     var body: some View { Text(label).font(.caption.weight(.medium)).foregroundStyle(color).padding(.horizontal,9).padding(.vertical,4).background(color.opacity(0.10),in: Capsule()) }
 }
 
+// macOS saves this value with the window, so it must never hold anything that acts when restored.
+// The first message stays in AppModel for this app run only.
 struct SessionLaunch: Codable, Hashable {
     var launchID: String
     var agentName: String
     var directory: String
-    var prompt: String
     var includeContext: Bool
     var projectRoot: String
     var sessionID: String
-    init(agentName: String, directory: String, prompt: String = "", includeContext: Bool = true, projectRoot: String = "", sessionID: String = "") {
+    init(agentName: String, directory: String, includeContext: Bool = true, projectRoot: String = "", sessionID: String = "") {
         self.launchID = sessionID.isEmpty ? UUID().uuidString : "resume:\(agentName):\(sessionID)"
-        self.agentName = agentName; self.directory = directory; self.prompt = prompt
+        self.agentName = agentName; self.directory = directory
         self.includeContext = includeContext; self.projectRoot = projectRoot; self.sessionID = sessionID
     }
     static func == (lhs: Self, rhs: Self) -> Bool { lhs.launchID == rhs.launchID }

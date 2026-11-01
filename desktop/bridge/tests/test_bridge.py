@@ -216,6 +216,71 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(result["messages"][1]["text"], "Here is the review.")
         self.assertFalse(result["truncated"])
 
+    def session_fixture(self, root, text="Saved conversation"):
+        folder = root / "sessions" / "project"
+        folder.mkdir(parents=True)
+        (folder / "one.jsonl").write_text(json.dumps({"type": "message", "id": "m1", "message": {"role": "user", "content": text}}))
+
+    def test_deleted_agent_sessions_stay_readable_but_not_as_a_live_agent(self):
+        self.session_fixture(self.agent_fixture())
+        self.request("agent.delete", name="reviewer", confirmed=True, keepSessions=True)
+        sessions = self.request("sessions.list")
+        self.assertEqual([(s["agent"], s["retained"], s["title"]) for s in sessions], [("reviewer", True, "Saved conversation")])
+        result = self.request("sessions.read", agent="reviewer", path=sessions[0]["path"], retainedFolder=sessions[0]["retainedFolder"])
+        self.assertEqual(result["messages"][0]["text"], "Saved conversation")
+
+    def test_retained_folder_cannot_escape_retained_sessions(self):
+        self.agent_fixture()
+        outside = self.fixture / "home" / "agents" / "reviewer" / "agent.jsonl"
+        outside.write_text('{"message":{"role":"user","content":"private"}}')
+        for folder in ("../agents/reviewer", "..", "reviewer/../../agents", ""):
+            with self.assertRaises(bridge.MantleError):
+                self.request("sessions.read", agent="reviewer", path=str(outside), retainedFolder=folder)
+
+    def test_agent_reusing_a_name_can_still_be_deleted_and_keeps_all_sessions(self):
+        self.session_fixture(self.agent_fixture(), "First agent")
+        self.request("agent.delete", name="reviewer", confirmed=True, keepSessions=True)
+        self.session_fixture(self.agent_fixture(), "Second agent")
+        self.request("agent.delete", name="reviewer", confirmed=True, keepSessions=True)
+        self.assertFalse((self.paths.agents / "reviewer").exists())
+        sessions = self.request("sessions.list")
+        self.assertEqual(sorted(s["title"] for s in sessions), ["First agent", "Second agent"])
+        self.assertEqual({s["agent"] for s in sessions}, {"reviewer"})
+        for session in sessions:
+            self.assertEqual(self.request("sessions.read", agent="reviewer", path=session["path"], retainedFolder=session["retainedFolder"])["messages"][0]["text"], session["title"])
+
+    def on_disk(self, *values):
+        files = [path for path in self.paths.home.rglob("*") if path.is_file() and not path.is_symlink()]
+        return sorted(value for value in values if any(value in path.read_text(errors="ignore") for path in files))
+
+    def test_sign_out_removes_the_credential_from_every_backup(self):
+        self.request("auth.saveKey", provider="openai", key="openai-first", confirmed=True)
+        self.request("auth.saveKey", provider="anthropic", key="anthropic-kept", confirmed=True)
+        self.request("auth.saveKey", provider="openai", key="openai-second", confirmed=True)
+        self.request("auth.logout", provider="openai", confirmed=True)
+        self.assertEqual(self.on_disk("openai-first", "openai-second", "anthropic-kept"), ["anthropic-kept"])
+
+    def test_removing_a_secret_removes_its_value_from_every_backup(self):
+        self.request("secrets.set", name="FIRST_TOKEN", value="first-value", confirmed=True)
+        self.request("secrets.set", name="OTHER_TOKEN", value="other-value", confirmed=True)
+        self.request("secrets.set", name="FIRST_TOKEN", value="second-value", confirmed=True)
+        self.request("secrets.remove", name="FIRST_TOKEN", confirmed=True)
+        self.assertEqual(self.on_disk("first-value", "second-value", "other-value"), ["other-value"])
+
+    def test_only_the_latest_credential_backup_is_kept(self):
+        for number in range(4):
+            self.request("auth.saveKey", provider="openai", key=f"value-{number}", confirmed=True)
+            self.request("secrets.set", name="TOKEN", value=f"secret-{number}", confirmed=True)
+        self.assertEqual(self.on_disk("value-0", "value-1", "value-2", "value-3"), ["value-2", "value-3"])
+        self.assertEqual(self.on_disk("secret-0", "secret-1", "secret-2", "secret-3"), ["secret-2", "secret-3"])
+
+    def test_unreadable_credential_backup_is_removed_on_sign_out(self):
+        backups = self.paths.home / "backups" / "credentials"
+        backups.mkdir(parents=True)
+        (backups / "20260101-auth.json").write_text("{not json with old-value")
+        self.request("auth.logout", provider="openai", confirmed=True)
+        self.assertEqual(self.on_disk("old-value"), [])
+
     def test_session_traversal_is_rejected(self):
         self.agent_fixture()
         outside = self.fixture / "outside.jsonl"

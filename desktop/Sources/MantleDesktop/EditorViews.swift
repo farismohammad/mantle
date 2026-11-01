@@ -99,7 +99,7 @@ struct LaunchSheet: View {
         }.padding(28).frame(width:610)
     }
     private func pickFolder() { let panel = NSOpenPanel(); panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false; panel.prompt = "Use This Folder"; if panel.runModal() == .OK { directory = panel.url?.path ?? "" } }
-    private func startNative() { openWindow(id:"live-session",value:SessionLaunch(agentName:agent.name,directory:directory,prompt:prompt,includeContext:context,projectRoot:root,sessionID:session)); dismiss() }
+    private func startNative() { let launch = SessionLaunch(agentName:agent.name,directory:directory,includeContext:context,projectRoot:root,sessionID:session); app.prepareSession(launch,firstMessage:prompt); openWindow(id:"live-session",value:launch); dismiss() }
     private func launch() { var args = ["agent","run",agent.name]; if !context { args.append("--no-project-context") }; if !root.isEmpty { args += ["--project-root",root] }; if !session.isEmpty { args += ["--session",session] }; if !prompt.isEmpty { args += ["--",prompt] }; app.terminal(args,directory:directory); dismiss() }
 }
 
@@ -115,24 +115,27 @@ struct SessionsView: View {
     @State private var failure:String?
     var body: some View {
         VStack(spacing:0) {
-            if agent == nil { PageHeader(title:"Pick up where you left off.",subtitle:"Your conversations, grouped around the work that matters.",symbol:"clock").padding(28); Divider() }
+            // A fixed height because the window's minimum size measures this wrapping text at its narrowest,
+            // which would otherwise push the whole layout past the bottom of the window.
+            if agent == nil { PageHeader(title:"Pick up where you left off.",subtitle:"Your conversations, grouped around the work that matters.",symbol:"clock").padding(28).frame(height:108); Divider() }
             if loading { ProgressView("Loading sessions…").frame(maxWidth:.infinity,maxHeight:.infinity) }
             else if let failure { EmptyState(symbol:"exclamationmark.bubble",title:"Couldn’t load sessions",detail:failure); Button("Try Again") { Task { await load() } }.padding() }
             else if sessions.isEmpty { EmptyState(symbol:"bubble.left.and.bubble.right",title:"Your next conversation starts here.",detail:"Run an agent in a project to start a session. Its history stays on your Mac and appears here.") }
             else {
+                // The list needs an explicit minimum, or its full content height overflows the window.
                 HSplitView {
-                    VStack(spacing:0) { TextField("Search sessions",text:$search).textFieldStyle(.roundedBorder).padding(14); List(sessions.filter { search.isEmpty || $0["title"].string.localizedCaseInsensitiveContains(search) },id: \.self,selection:$selected) { item in VStack(alignment:.leading,spacing:7) { Text(item["title"].string).font(.callout.weight(.medium)).lineLimit(2); Text(item["agent"].string).font(.caption).foregroundStyle(Color.mantleAccent); Text(String(item["updatedAt"].string.prefix(10))).font(.caption2).foregroundStyle(.secondary) }.padding(.vertical,7).tag(item["path"].string) }.listStyle(.sidebar) }.frame(minWidth:220,idealWidth:280,maxWidth:330)
+                    VStack(spacing:0) { TextField("Search sessions",text:$search).textFieldStyle(.roundedBorder).padding(14); List(sessions.filter { search.isEmpty || $0["title"].string.localizedCaseInsensitiveContains(search) },id: \.self,selection:$selected) { item in VStack(alignment:.leading,spacing:7) { Text(item["title"].string).font(.callout.weight(.medium)).lineLimit(2); Text(item["agent"].string + (item["retained"].bool ? " · deleted" : "")).font(.caption).foregroundStyle(Color.mantleAccent); Text(String(item["updatedAt"].string.prefix(10))).font(.caption2).foregroundStyle(.secondary) }.padding(.vertical,7).tag(item["path"].string) }.listStyle(.sidebar) }.frame(minWidth:220,idealWidth:280,maxWidth:330,minHeight:0,maxHeight:.infinity)
                     VStack(spacing:0) {
                         if let current = sessions.first(where:{$0["path"].string == selected}) {
-                            HStack { VStack(alignment:.leading,spacing:5) { Text(current["title"].string).font(.headline).lineLimit(2); Text(current["cwd"].string).font(.caption).foregroundStyle(.secondary).lineLimit(1) }; Spacer(); Button("Resume Session") { let folder = current["cwd"].string; if folder.isEmpty { app.error = "This session has no saved project folder. Start the agent and choose a project, then enter this session path in More Options." } else { openWindow(id:"live-session",value:SessionLaunch(agentName:current["agent"].string,directory:folder,sessionID:current["path"].string)) } } }.padding(20)
+                            HStack { VStack(alignment:.leading,spacing:5) { Text(current["title"].string).font(.headline).lineLimit(2); Text(current["cwd"].string).font(.caption).foregroundStyle(.secondary).lineLimit(1) }; Spacer(); if current["retained"].bool { StatusPill(label:"Agent deleted · read only",color:.secondary) } else { Button("Resume Session") { let folder = current["cwd"].string; if folder.isEmpty { app.error = "This session has no saved project folder. Start the agent and choose a project, then enter this session path in More Options." } else { let launch = SessionLaunch(agentName:current["agent"].string,directory:folder,sessionID:current["path"].string); app.prepareSession(launch); openWindow(id:"live-session",value:launch) } } } }.padding(20)
                             Divider()
                             ScrollView { LazyVStack(alignment:.leading,spacing:18) { ForEach(Array(detail["messages"].array.enumerated()),id: \.offset) { _,message in VStack(alignment:.leading,spacing:8) { Label(message["role"].string.capitalized,systemImage:message["role"].string == "user" ? "person.crop.circle" : "sparkles").font(.caption.weight(.semibold)).foregroundStyle(Color.mantleAccent); Text(message["text"].string).font(.system(size:13)).lineSpacing(4).textSelection(.enabled).frame(maxWidth:.infinity,alignment:.leading) }.padding(18).background(.primary.opacity(0.035),in:RoundedRectangle(cornerRadius:12)) }; if detail["truncated"].bool { Text("Showing the latest 1,000 messages. Resume in Terminal for the full session.").font(.caption).foregroundStyle(.secondary) } }.padding(22) }
                         } else { EmptyState(symbol:"text.bubble",title:"Choose a session",detail:"Read the conversation or continue from where you left off.") }
-                    }.frame(minWidth:350,maxWidth:.infinity,maxHeight:.infinity)
-                }
+                    }.frame(minWidth:350,maxWidth:.infinity,minHeight:0,maxHeight:.infinity)
+                }.frame(minHeight:0,maxHeight:.infinity)
             }
         }.task { await load() }.onChange(of:selected) { _,value in Task { await select(value) } }
     }
     private func load() async { loading = true; defer { loading = false }; do { sessions = try await app.request("sessions.list",agent.map { ["agent":.string($0.name)] } ?? [:]).array; failure = nil } catch { failure = error.localizedDescription } }
-    private func select(_ path:String?) async { guard let path, let item = sessions.first(where:{$0["path"].string == path}) else { detail = .null; return }; do { let result = try await app.request("sessions.read",["agent":item["agent"],"path":.string(path)]); if selected == path { detail = result } } catch { app.error = error.localizedDescription } }
+    private func select(_ path:String?) async { guard let path, let item = sessions.first(where:{$0["path"].string == path}) else { detail = .null; return }; do { var parameters:[String:JSON] = ["agent":item["agent"],"path":.string(path)]; if item["retained"].bool { parameters["retainedFolder"] = item["retainedFolder"] }; let result = try await app.request("sessions.read",parameters); if selected == path { detail = result } } catch { app.error = error.localizedDescription } }
 }
