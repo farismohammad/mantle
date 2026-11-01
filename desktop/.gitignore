@@ -1,0 +1,9 @@
+.build*/
+.module-cache*/
+builds/
+releases/
+qa/
+*.log
+.swiftpm/
+__pycache__/
+*.pyc
