@@ -34,6 +34,14 @@ struct MantleDesktopApp: App {
                     .preferredColorScheme(appearance == "system" ? nil : appearance == "light" ? .light : .dark)
             } else { EmptyState(symbol: "square.stack.3d.up", title: "Agent unavailable", detail: "Open your agent library, then start or resume a session.") }
         }.defaultSize(width: 1000, height: 760)
+        // The agent editor is its own window so it can be moved, resized, and kept beside the library.
+        // The value is the agent's name, or an empty string for a new agent.
+        WindowGroup("Agent", id: "agent-editor", for: String.self) { $name in
+            AgentEditorWindow(name: name ?? "").environmentObject(app).tint(.mantleAccent)
+                .preferredColorScheme(appearance == "system" ? nil : appearance == "light" ? .light : .dark)
+        }
+        .defaultSize(width: 760, height: 820)
+        .windowResizability(.contentMinSize)
         Settings {
             Form {
                 Picker("Appearance",selection: $appearance) { Text("Dark").tag("dark"); Text("Light").tag("light"); Text("System").tag("system") }
@@ -42,6 +50,22 @@ struct MantleDesktopApp: App {
                 Button("Show in Finder") { NSWorkspace.shared.selectFile(nil,inFileViewerRootedAtPath: app.home) }
             }.formStyle(.grouped).padding().frame(width: 500,height: 230).tint(.mantleAccent)
         }
+    }
+}
+
+/// Hosts the agent editor in a standalone window. Closing the window discards unsaved edits.
+struct AgentEditorWindow: View {
+    @EnvironmentObject private var app: AppModel
+    @Environment(\.dismiss) private var dismiss
+    let name: String
+    var body: some View {
+        Group {
+            if name.isEmpty { AgentEditor(agent: nil) }
+            else if let agent = app.agents.first(where: { $0.name == name }) { AgentEditor(agent: agent) }
+            else if app.loading { ProgressView().frame(width: 400, height: 300) }
+            else { EmptyState(symbol: "square.stack.3d.up", title: "Agent unavailable", detail: "This agent no longer exists.").frame(width: 480, height: 320) }
+        }
+        .navigationTitle(name.isEmpty ? "New Agent" : "Edit \(name)")
     }
 }
 
@@ -57,6 +81,7 @@ struct ClosedSessionView: View {
 }
 
 struct RootView: View {
+    @Environment(\.openWindow) private var openWindow
     @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var app: AppModel
     @State private var columnVisibility = NavigationSplitViewVisibility.all
@@ -102,8 +127,9 @@ struct RootView: View {
                 }
             }
         }
-        .sheet(isPresented: $app.showCreate) { AgentEditor(agent: nil).environmentObject(app) }
-        .sheet(item: $app.editingAgent) { agent in AgentEditor(agent: agent).environmentObject(app) }
+        // New and edited agents open in their own movable window rather than a sheet attached to this one.
+        .onChange(of: app.showCreate) { _,show in if show { app.showCreate = false; openWindow(id: "agent-editor", value: "") } }
+        .onChange(of: app.editingAgent) { _,agent in if let agent { app.editingAgent = nil; openWindow(id: "agent-editor", value: agent.name) } }
         .sheet(item: $app.launchAgent) { agent in LaunchSheet(agent: agent).environmentObject(app) }
         .alert("Couldn’t complete the action",isPresented: Binding(get: { app.error != nil },set: { if !$0 { app.error = nil } })) { Button("OK") { app.error = nil } } message: { Text(app.error ?? "") }
     }
@@ -124,6 +150,17 @@ struct RootView: View {
 
 struct AgentWorkspace: View {
     @EnvironmentObject private var app: AppModel
+    @Environment(\.openWindow) private var openWindow
+    private func agent(for ids: Set<String>) -> MantleAgent? { ids.count == 1 ? app.agents.first { ids.contains($0.id) } : nil }
+    /// Double-click opens a chat in the agent's last folder; with no known folder it asks for one.
+    private func quickStart(_ agent: MantleAgent) {
+        Task {
+            let directory = await app.suggestedDirectory(for: agent)
+            if directory.isEmpty { app.launchAgent = agent; return }
+            let launch = SessionLaunch(agentName: agent.name, directory: directory)
+            app.prepareSession(launch); openWindow(id: "live-session", value: launch)
+        }
+    }
     var body: some View {
         if app.agents.isEmpty { WelcomeView() }
         else {
@@ -134,6 +171,13 @@ struct AgentWorkspace: View {
                     List(app.filteredAgents,selection: $app.selection) { agent in
                         HStack(alignment: .top,spacing: 11) { Image(systemName: agent.symbol).font(.system(size: 17)).foregroundStyle(Color.mantleAccent).frame(width: 34,height: 34).background(Color.mantleAccent.opacity(0.10),in: RoundedRectangle(cornerRadius: 9)); VStack(alignment: .leading,spacing: 6) { Text(agent.title).font(.system(size: 13,weight: .semibold)); Text(agent.description.isEmpty ? agent.model : agent.description).font(.caption).foregroundStyle(.secondary).lineLimit(2); Text(agent.provider).font(.system(size: 10,weight: .medium)).foregroundStyle(.tertiary) }; Spacer(minLength: 0) }.padding(.vertical,9).tag(agent.id)
                     }.listStyle(.sidebar)
+                    .contextMenu(forSelectionType: String.self) { ids in
+                        if let agent = agent(for: ids) {
+                            Button("Start Chat") { quickStart(agent) }
+                            Button("Run Agent…") { app.launchAgent = agent }
+                            Button("Edit Configuration…") { app.editingAgent = agent }
+                        }
+                    } primaryAction: { ids in if let agent = agent(for: ids) { quickStart(agent) } }
                     if app.filteredAgents.isEmpty { Text("No agents match your search.").font(.caption).foregroundStyle(.secondary).padding() }
                     if !app.snapshot["damaged"].object.isEmpty {
                         VStack(alignment: .leading,spacing: 8) {

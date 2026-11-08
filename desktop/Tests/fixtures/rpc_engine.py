@@ -67,6 +67,10 @@ for line in sys.stdin.buffer:
         running = False
         response(command)
         emit({"type": "agent_settled", "aborted": True})
+    elif kind == "get_available_models":
+        response(command, {"models": [{"provider": "fixture", "id": "offline-fixture", "name": "Offline Fixture"}]})
+    elif kind == "get_available_thinking_levels":
+        response(command, {"levels": ["off"]})
     elif kind == "get_session_stats":
         response(command, {"tokens": {"total": 123}})
     else:

@@ -37,6 +37,14 @@ struct SessionDialog: Identifiable {
     @Published var pendingMessages = 0
     @Published var usage = ""
     @Published var needsCredentials = false
+    // Model and thinking controls. Empty until Pi reports them, so older runtimes hide the pickers.
+    @Published var models: [JSON] = []
+    @Published var modelProvider = ""
+    @Published var modelID = ""
+    @Published var modelName = ""
+    @Published var thinkingLevel = ""
+    @Published var thinkingLevels: [String] = []
+    private var pendingThinking: [String: String] = [:]
     private var process: Process?
     private var input: FileHandle?
     private var output: FileHandle?
@@ -84,7 +92,7 @@ struct SessionDialog: Identifiable {
                     guard let self, !data.isEmpty else { return }
                     let text = String(decoding: data, as: UTF8.self)
                     self.diagnostics = String((self.diagnostics + text).suffix(20000))
-                    if !self.ready, let last = text.split(separator: "\n").last { self.status = String(last).prefixString(180) }
+                    if !self.ready, let last = text.split(separator: "\n").last { self.status = String(last).withoutTerminalCodes.prefixString(180) }
                 }
             }
             child.terminationHandler = { [weak self] child in
@@ -149,6 +157,35 @@ struct SessionDialog: Identifiable {
         let handle = input
         writer.async { try? handle?.close() }
         input = nil
+    }
+
+    func setModel(provider: String, id: String) {
+        guard ready, !running, provider != modelProvider || id != modelID else { return }
+        error = nil; needsCredentials = false
+        send("set_model", fields: ["provider": .string(provider), "modelId": .string(id)])
+    }
+
+    func setThinking(_ level: String) {
+        guard ready, !running, level != thinkingLevel else { return }
+        let id = UUID().uuidString; pendingThinking[id] = level
+        send("set_thinking_level", fields: ["level": .string(level)], id: id)
+    }
+
+    /// Model choices grouped by provider, in the order Pi listed them.
+    var modelsByProvider: [(provider: String, models: [JSON])] {
+        var order: [String] = []; var groups: [String: [JSON]] = [:]
+        for model in models {
+            let provider = model["provider"].string
+            if groups[provider] == nil { order.append(provider) }
+            groups[provider, default: []].append(model)
+        }
+        return order.map { ($0, groups[$0] ?? []) }
+    }
+
+    private func applyModel(_ model: JSON) {
+        guard !model["id"].string.isEmpty else { return }
+        modelProvider = model["provider"].string; modelID = model["id"].string
+        modelName = model["name"].string.isEmpty ? model["id"].string : model["name"].string
     }
 
     func answer(_ dialog: SessionDialog, value: String? = nil, confirmed: Bool? = nil, cancelled: Bool = false) {
@@ -237,7 +274,7 @@ struct SessionDialog: Identifiable {
             else if method == "set_editor_text" { draft = record["text"].string }
             else if method == "notify" {
                 transcript.append(SessionTranscriptItem(id: UUID().uuidString, role: "notice", text: record["message"].string, isError: record["notifyType"].string == "error"))
-            } else if method == "setStatus" { status = record["statusText"].string.isEmpty ? "Working…" : record["statusText"].string }
+            } else if method == "setStatus" { let text = record["statusText"].string.withoutTerminalCodes; status = text.isEmpty ? "Working…" : text }
             else if method == "setTitle" { sessionTitle = record["title"].string }
             else if method == "setWidget", !record["widgetLines"].array.isEmpty {
                 transcript.append(SessionTranscriptItem(id: UUID().uuidString, role: "notice", text: record["widgetLines"].array.map(\.string).joined(separator: "\n")))
@@ -249,6 +286,9 @@ struct SessionDialog: Identifiable {
     private func handleResponse(_ record: JSON) {
         let command = record["command"].string
         if !record["success"].bool {
+            // Older Pi versions lack these queries; the pickers simply stay hidden.
+            if ["get_available_models", "get_available_thinking_levels"].contains(command) { return }
+            if command == "set_thinking_level" { pendingThinking.removeValue(forKey: record["id"].string) }
             if command == "clear_queue" {
                 // Older Pi versions have no clear_queue, so a queued instruction may still run.
                 if pendingMessages > 0 { error = "This Pi version can’t cancel queued instructions, so yours may still run. Update the agent’s runtime to avoid this." }
@@ -265,6 +305,8 @@ struct SessionDialog: Identifiable {
         switch command {
         case "get_state":
             sessionFile = data["sessionFile"].string; sessionTitle = data["sessionName"].string
+            applyModel(data["model"])
+            if !data["thinkingLevel"].string.isEmpty { thinkingLevel = data["thinkingLevel"].string }
             running = data["isStreaming"].bool || data["isCompacting"].bool || data["pendingMessageCount"].int > 0
             if !running { status = stopRequested ? "Stopped" : "Ready" }
             if record["id"].string == "initial-state" { status = "Opening the conversation…"; send("get_messages", id: "initial-messages") }
@@ -277,8 +319,18 @@ struct SessionDialog: Identifiable {
                     guard !text.isEmpty else { return nil }
                     return SessionTranscriptItem(id: "history-\(index)", role: role == "toolResult" ? "tool" : role, text: text, title: message["toolName"].string)
                 }
+                send("get_available_models"); send("get_available_thinking_levels")
                 if !initialPrompt.isEmpty { draft = initialPrompt; initialPrompt = ""; submit() }
             }
+        case "get_available_models": models = data["models"].array.filter { !$0["id"].string.isEmpty }
+        case "get_available_thinking_levels": thinkingLevels = data["levels"].array.map(\.string).filter { !$0.isEmpty }
+        case "set_model":
+            applyModel(data)
+            // Each model supports its own thinking levels, and Pi may clamp the current one.
+            send("get_available_thinking_levels"); send("get_state")
+        case "set_thinking_level":
+            if let level = pendingThinking.removeValue(forKey: record["id"].string) { thinkingLevel = level }
+            send("get_state")
         case "prompt": pendingPrompts.removeValue(forKey: record["id"].string); if data["disposition"].string == "handled" { send("get_state") }
         case "abort": running = false; status = "Stopped"
         case "clear_queue":
@@ -358,7 +410,7 @@ struct LiveSessionView: View {
                 MantleMark(size: 36)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(session.sessionTitle.isEmpty ? agent.title : session.sessionTitle).font(.headline)
-                    HStack(spacing: 5) { Text(agent.model); Text("·"); Text(URL(fileURLWithPath: directory).lastPathComponent) }.font(.caption).foregroundStyle(.secondary)
+                    HStack(spacing: 5) { Text(session.modelName.isEmpty ? agent.model : session.modelName); Text("·"); Text(URL(fileURLWithPath: directory).lastPathComponent) }.font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
                 if session.running || !session.ready && !session.ended { ProgressView().controlSize(.small) }
@@ -430,8 +482,52 @@ struct LiveSessionView: View {
                 if session.running { Button { session.stop() } label: { Image(systemName: "stop.fill").frame(width: 20, height: 20) }.buttonStyle(.bordered).help("Stop the current run") }
                 Button { session.submit() } label: { Image(systemName: "arrow.up").font(.system(size: 15, weight: .semibold)).frame(width: 22, height: 22) }.buttonStyle(.borderedProminent).help(session.running ? "Queue an instruction" : "Send message").disabled(!session.ready || session.ended || session.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).keyboardShortcut(.return, modifiers: .command)
             }.padding(16).background(.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 16)).overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(.primary.opacity(0.08)))
-            HStack { Text(session.pendingMessages > 0 ? "\(session.pendingMessages) instruction(s) queued" : "\(agent.provider) · \(session.usage.isEmpty ? "Saved on this Mac" : session.usage)"); Spacer(); Text("⌘ Return to send") }.font(.caption2).foregroundStyle(.secondary)
+            HStack(spacing: 12) {
+                modelControls
+                Text(session.pendingMessages > 0 ? "\(session.pendingMessages) instruction(s) queued" : session.usage.isEmpty ? "Saved on this Mac" : session.usage)
+                Spacer(); Text("⌘ Return to send")
+            }.font(.caption2).foregroundStyle(.secondary)
         }.padding(.horizontal, 28).padding(.bottom, 20)
+    }
+
+    // Changes apply to the next message; Pi doesn't allow switching mid-run.
+    @ViewBuilder private var modelControls: some View {
+        let locked = !session.ready || session.ended || session.running
+        if session.models.isEmpty {
+            Text("\(session.modelProvider.isEmpty ? agent.provider : session.modelProvider) · \(session.modelName.isEmpty ? agent.model : session.modelName)")
+        } else {
+            Menu {
+                ForEach(session.modelsByProvider, id: \.provider) { group in
+                    Section(group.provider) {
+                        ForEach(group.models.indices, id: \.self) { index in
+                            let model = group.models[index]
+                            let selected = model["provider"].string == session.modelProvider && model["id"].string == session.modelID
+                            Button { session.setModel(provider: model["provider"].string, id: model["id"].string) } label: {
+                                if selected { Label(Self.modelLabel(model), systemImage: "checkmark") } else { Text(Self.modelLabel(model)) }
+                            }
+                        }
+                    }
+                }
+            } label: {
+                Label("\(session.modelProvider) · \(session.modelName.isEmpty ? agent.model : session.modelName)", systemImage: "cpu").font(.caption2)
+            }.menuStyle(.borderlessButton).fixedSize().disabled(locked).help(session.running ? "Wait for the current run to finish to change the model" : "Provider and model")
+        }
+        if session.thinkingLevels.count > 1 {
+            Menu {
+                ForEach(session.thinkingLevels, id: \.self) { level in
+                    Button { session.setThinking(level) } label: {
+                        if level == session.thinkingLevel { Label(Self.thinkingLabel(level), systemImage: "checkmark") } else { Text(Self.thinkingLabel(level)) }
+                    }
+                }
+            } label: {
+                Label("Thinking: \(Self.thinkingLabel(session.thinkingLevel.isEmpty ? "off" : session.thinkingLevel))", systemImage: "brain").font(.caption2)
+            }.menuStyle(.borderlessButton).fixedSize().disabled(locked).help(session.running ? "Wait for the current run to finish to change thinking" : "Thinking level")
+        }
+    }
+
+    private static func modelLabel(_ model: JSON) -> String { model["name"].string.isEmpty ? model["id"].string : model["name"].string }
+    private static func thinkingLabel(_ level: String) -> String {
+        switch level { case "xhigh": return "Extra High"; case "max": return "Max"; default: return level.capitalized }
     }
 }
 
@@ -481,5 +577,14 @@ private struct NativeSessionDialog: View {
                 else if dialog.raw["method"].string != "select" { Button("Continue") { answer(input, nil, false) }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction) }
             }
         }.padding(28).frame(width: 520).onAppear { input = dialog.raw["prefill"].string }.interactiveDismissDisabled()
+    }
+}
+
+extension String {
+    /// Removes ANSI colour and cursor sequences that Pi extensions include for terminals.
+    var withoutTerminalCodes: String {
+        replacingOccurrences(of: "\u{1B}\\[[0-9;?]*[ -/]*[@-~]", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "\u{1B}\\][^\u{07}]*\u{07}", with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

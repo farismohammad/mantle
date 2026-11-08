@@ -142,7 +142,24 @@ enum Destination: String, CaseIterable, Identifiable {
     // A window whose launch isn't listed was restored by macOS and must not start an agent.
     @Published private(set) var openedLaunches: Set<String> = []
     private var firstMessages: [String: String] = [:]
-    func prepareSession(_ launch: SessionLaunch, firstMessage: String = "") { openedLaunches.insert(launch.launchID); firstMessages[launch.launchID] = firstMessage }
+    func prepareSession(_ launch: SessionLaunch, firstMessage: String = "") {
+        openedLaunches.insert(launch.launchID); firstMessages[launch.launchID] = firstMessage
+        rememberDirectory(launch.directory, for: launch.agentName)
+    }
+    func rememberDirectory(_ directory: String, for agentName: String) {
+        guard !directory.isEmpty else { return }
+        UserDefaults.standard.set(directory, forKey: "lastDirectory.\(agentName)")
+    }
+    /// The folder this agent last worked in: the one Mantle remembers, else its newest session's folder.
+    func suggestedDirectory(for agent: MantleAgent) async -> String {
+        func usable(_ path: String) -> Bool {
+            var isDirectory: ObjCBool = false
+            return !path.isEmpty && FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
+        }
+        if let saved = UserDefaults.standard.string(forKey: "lastDirectory.\(agent.name)"), usable(saved) { return saved }
+        guard let sessions = try? await request("sessions.list", ["agent": .string(agent.name)]).array else { return "" }
+        return sessions.map { $0["cwd"].string }.first(where: usable) ?? ""
+    }
     func takeFirstMessage(_ launchID: String) -> String { firstMessages.removeValue(forKey: launchID) ?? "" }
     func showMainWindow() { NSApp.windows.first { $0.isVisible && $0.canBecomeMain && $0.title != "Mantle Session" }?.makeKeyAndOrderFront(nil) }
     var selectedAgent: MantleAgent? { agents.first { $0.id == selection } }

@@ -157,7 +157,7 @@ struct RegistryView: View {
                 Picker("Sort", selection: $sortRecent) { Text("Recent").tag(true); Text("Name").tag(false) }.labelsHidden().frame(width: 120)
             }
             if filtered.isEmpty {
-                Text(agents.isEmpty ? "No configurations have been published yet. Publish one of your local agents below." : "No agents match your search.").foregroundStyle(.secondary).padding(.vertical, 12)
+                Text(agents.isEmpty ? "No configurations have been pushed yet. Push one of your local agents below." : "No agents match your search.").foregroundStyle(.secondary).padding(.vertical, 12)
             } else {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 240), spacing: 12)], spacing: 12) {
                     ForEach(filtered, id: \.self) { agent in
@@ -242,13 +242,13 @@ struct RegistryView: View {
     }
 
     private var publishPanel: some View {
-        Surface(title: "Publish from this Mac") {
+        Surface(title: "Push from this Mac") {
             Text("Share an agent’s configuration as an immutable registry revision.").font(.callout).foregroundStyle(.secondary)
             HStack {
                 Picker("Agent", selection: $publishName) { Text("Choose an agent").tag(""); ForEach(app.agents) { agent in Text(agent.name).tag(agent.name) } }.frame(maxWidth: 420)
                 Spacer()
-                Button("Publish", systemImage: "arrow.up.circle") {
-                    pending = PendingAction(title: "Publish \(publishName)?", message: "Its agent.yaml will be visible to everyone with access to this registry. Existing registry content receives a new revision. Credentials and sessions are not uploaded.", button: "Publish", operation: "cloud.push", parameters: ["name": .string(publishName), "confirmed": .bool(true)], success: "Agent published.")
+                Button("Push", systemImage: "arrow.up.circle") {
+                    pending = PendingAction(title: "Push \(publishName)?", message: "Its agent.yaml will be visible to everyone with access to this registry. Existing registry content receives a new revision. Credentials and sessions are not uploaded.", button: "Push", operation: "cloud.push", parameters: ["name": .string(publishName), "confirmed": .bool(true)], success: "Agent pushed.")
                 }.buttonStyle(.borderedProminent).disabled(publishName.isEmpty || app.busy)
             }
         }
@@ -327,7 +327,7 @@ private struct RegistryEditor: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack { VStack(alignment: .leading, spacing: 5) { Text(name.isEmpty ? "New registry configuration" : "Edit \(name)").font(.title2.bold()); Text("Saving creates a new immutable revision.").foregroundStyle(.secondary) }; Spacer() }
             if name.isEmpty { Text("Set agent.name below, then validate before saving.").font(.callout).foregroundStyle(.secondary) }
-            TextEditor(text: $yaml).font(.system(size: 13, design: .monospaced)).scrollContentBackground(.hidden).padding(12).background(Color.mantleCanvas, in: RoundedRectangle(cornerRadius: 10)).onChange(of: yaml) { _, _ in verified = false }.accessibilityLabel("Agent YAML configuration")
+            LeftAlignedTextView(text: $yaml, accessibilityTitle: "Registry YAML", font: .monospacedSystemFont(ofSize: 13, weight: .regular), tinted: false).padding(12).background(Color.mantleCanvas, in: RoundedRectangle(cornerRadius: 10)).onChange(of: yaml) { _, _ in verified = false }.accessibilityLabel("Agent YAML configuration")
             if !output.isEmpty { Text(output).font(.callout).foregroundStyle(verified ? Color.green : Color.secondary).lineLimit(5).textSelection(.enabled) }
             HStack {
                 Button("Validate") { validate(format: false) }
@@ -339,7 +339,7 @@ private struct RegistryEditor: View {
             }.disabled(working || app.busy)
         }.padding(24).frame(width: 800, height: 650)
         .onAppear { yaml = initial; publishName = name }
-        .confirmationDialog("Publish this configuration to the registry?", isPresented: $showPublish, titleVisibility: .visible) {
+        .confirmationDialog("Push this configuration to the registry?", isPresented: $showPublish, titleVisibility: .visible) {
             Button("Save revision") { save() }
         } message: { Text("Anyone with access to the registry can read the complete YAML. Include secret names only, never credential values.") }
     }
