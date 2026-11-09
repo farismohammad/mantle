@@ -83,6 +83,47 @@ def copytree(source: Path, destination: Path) -> None:
     shutil.copytree(source, destination, symlinks=True, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store", ".pytest_cache"))
 
 
+def scrub_build_paths(resources: Path, python_home: Path) -> None:
+    """Remove the builder's local paths from the copied bundle resources.
+
+    uv records the Python install location in sysconfig data and in console
+    script shebangs. The app never uses either, but they would reveal the
+    builder's home directory. Only the copies inside the bundle change.
+    """
+    local_prefix = str(python_home).encode()
+    neutral_prefix = b"/install"  # The prefix python-build-standalone itself uses.
+    scrubbed = 0
+    for path in resources.rglob("*"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        if is_macho(path):
+            # uv sets libpython's install name to its absolute location. The
+            # interpreter loads it through @rpath, so use that as its identity.
+            install_name = subprocess.run(["otool", "-D", str(path)], capture_output=True, text=True).stdout.splitlines()[1:]
+            if install_name and install_name[0].startswith(str(python_home)):
+                mode = path.stat().st_mode
+                path.chmod(mode | 0o200)
+                run(["install_name_tool", "-id", f"@rpath/{Path(install_name[0]).name}", str(path)])
+                path.chmod(mode)
+                scrubbed += 1
+            continue
+        data = path.read_bytes()
+        if b"\0" in data[:8192] or local_prefix not in data:
+            continue
+        mode = path.stat().st_mode
+        path.chmod(mode | 0o200)
+        path.write_bytes(data.replace(local_prefix, neutral_prefix))
+        path.chmod(mode)
+        scrubbed += 1
+    print(f"→ Replaced the local Python path in {scrubbed} bundled files", flush=True)
+    home = str(Path.home()).encode()
+    contents = resources.parent
+    leaks = [str(path.relative_to(contents)) for folder in (contents / "MacOS", resources) for path in folder.rglob("*")
+             if not path.is_symlink() and path.is_file() and home in path.read_bytes()]
+    if leaks:
+        raise SystemExit("The bundle still contains the builder's home directory in: " + ", ".join(leaks[:20]))
+
+
 def is_macho(path: Path) -> bool:
     if path.is_symlink() or not path.is_file():
         return False
@@ -127,7 +168,9 @@ def main() -> None:
     if binary is None:
         scratch = build_root / "swift"
         swift_env = dict(os.environ, CLANG_MODULE_CACHE_PATH=str(build_root / "clang-module-cache"), SWIFTPM_MODULECACHE_OVERRIDE=str(build_root / "swift-module-cache"))
-        swift_command = ["swift", "build", "--package-path", str(DESKTOP), "--sdk", str(sdk), "--scratch-path", str(scratch), "--cache-path", str(build_root / "swift-cache"), "--config-path", str(build_root / "swift-config"), "--security-path", str(build_root / "swift-security"), "--manifest-cache", "local", "--configuration", args.configuration]
+        swift_command = ["swift", "build", "--package-path", str(DESKTOP), "--sdk", str(sdk), "--scratch-path", str(scratch), "--cache-path", str(build_root / "swift-cache"), "--config-path", str(build_root / "swift-config"), "--security-path", str(build_root / "swift-security"), "--manifest-cache", "local", "--configuration", args.configuration,
+                         # Record source paths relative to the checkout, not the builder's home directory.
+                         "-Xswiftc", "-file-prefix-map", "-Xswiftc", f"{REPOSITORY}=."]
         run(swift_command + ["--product", "Mantle"], env=swift_env)
         result = run(swift_command + ["--show-bin-path"], capture_output=True, text=True, env=swift_env)
         binary = Path(result.stdout.strip()) / "Mantle"
@@ -138,6 +181,8 @@ def main() -> None:
     executables = fresh_directory(contents / "MacOS")
     resources = fresh_directory(contents / "Resources")
     shutil.copy2(binary, executables / "Mantle")
+    # Drop debug symbol entries, which name the local object files.
+    run(["strip", "-S", str(executables / "Mantle")])
     with (DESKTOP / "Resources/Info.plist").open("rb") as stream:
         info = plistlib.load(stream)
     if qa_home is not None:
@@ -162,6 +207,7 @@ def main() -> None:
     iconset = build_root / "Mantle.iconset"
     run(["swift", "-sdk", str(sdk), "-module-cache-path", str(build_root / "swift-module-cache"), str(DESKTOP / "scripts/make_icon.swift"), str(iconset)])
     run(["iconutil", "--convert", "icns", str(iconset), "--output", str(resources / "Mantle.icns")])
+    scrub_build_paths(resources, python_home)
     manifest = {
         "builtAt": datetime.now(timezone.utc).isoformat(),
         "architecture": "arm64",
